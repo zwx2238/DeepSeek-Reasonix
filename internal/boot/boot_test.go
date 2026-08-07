@@ -3509,6 +3509,31 @@ func systemMessage(msgs []provider.Message) string {
 	return ""
 }
 
+func TestApplyBrokerManagedToolPolicy(t *testing.T) {
+	const base = "base prompt"
+
+	if got := applyBrokerManagedToolPolicy(base, false, ToolAccessDeny); got != base {
+		t.Fatalf("unmanaged prompt = %q, want unchanged", got)
+	}
+	if got := applyBrokerManagedToolPolicy(base, true, ToolAccessAllow); got != base {
+		t.Fatalf("allow prompt = %q, want unchanged", got)
+	}
+
+	readOnly := applyBrokerManagedToolPolicy(base, true, ToolAccessReadOnly)
+	for _, want := range []string{"read-only", "Do not attempt shell commands", "Do not emit tool-call markup"} {
+		if !strings.Contains(readOnly, want) {
+			t.Fatalf("read-only prompt missing %q:\n%s", want, readOnly)
+		}
+	}
+
+	deny := applyBrokerManagedToolPolicy(base, true, ToolAccessDeny)
+	for _, want := range []string{"no tools", "Never emit tool calls", "cannot be performed"} {
+		if !strings.Contains(deny, want) {
+			t.Fatalf("deny prompt missing %q:\n%s", want, deny)
+		}
+	}
+}
+
 func stripLanguagePolicy(s string) string {
 	s = strings.TrimSpace(s)
 	for _, policy := range []string{

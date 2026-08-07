@@ -190,12 +190,46 @@ type Options struct {
 	SandboxNetworkOverride *bool
 	SandboxBashOverride    string
 	WorkspaceOnly          bool
+	// BrokerManaged prevents project-owned configuration and extension discovery
+	// from changing a supervised ACP worker's runtime.
+	BrokerManaged bool
+	// ToolAccess is a supervisor-enforced upper bound on the executor registry.
+	// Empty and "allow" preserve the normal tool surface.
+	ToolAccess ToolAccess
 	// SessionTemp is the logical-session private temporary directory manager.
 	// Rebuild passes the previous Controller's Manager so hot rebuilds keep
 	// temporary files. Empty creates a fresh Manager inside control.New.
 	// Frontends that build a replacement Controller without Rebuild must pass
 	// the same Manager for the same logical session.
 	SessionTemp *sessiontemp.Manager
+}
+
+type ToolAccess string
+
+const (
+	ToolAccessAllow    ToolAccess = "allow"
+	ToolAccessReadOnly ToolAccess = "read-only"
+	ToolAccessDeny     ToolAccess = "deny"
+)
+
+func applyBrokerManagedToolPolicy(prompt string, managed bool, access ToolAccess) string {
+	if !managed {
+		return prompt
+	}
+	var policy string
+	switch access {
+	case ToolAccessReadOnly:
+		policy = `## Broker tool policy
+
+This session is strictly read-only. Use only tools present in the current tool schema. Do not attempt shell commands, file writes, process control, installers, delegation, or any tool that is not listed. Do not emit tool-call markup for unavailable tools. If the requested work requires mutation, state that the write cannot be performed in this session.`
+	case ToolAccessDeny:
+		policy = `## Broker tool policy
+
+This session has no tools. Answer only from the user message and instruction documents already present in context. Never emit tool calls, tool-call markup, XML/DSML invoke blocks, or claims that files, commands, network resources, or external state were inspected. If the requested work requires tool access, state that it cannot be performed in this session.`
+	default:
+		return prompt
+	}
+	return strings.TrimSpace(prompt) + "\n\n" + policy
 }
 
 func recoveryHeadlessMode(opts Options) bool {
@@ -218,13 +252,21 @@ func build(ctx context.Context, opts Options) (*BuildResult, error) {
 		return nil, err
 	}
 	// One-time import of v1/v0.5 legacy config — runs before Load so the freshly
-	// written config + ~/.env are picked up this same boot. CLI Run also calls this
-	// before config-only commands; this call stays as the shared frontend fallback.
-	migrated, migErr := config.MigrateLegacyIfNeededForRoot(root)
-	stepLimitsMigrated, stepLimitMigErr := config.MigrateLegacyAgentStepLimitsForRoot(root)
-	redactToolOutputMigrated, redactToolOutputMigErr := config.MigrateLegacyRedactToolOutputForRoot(root)
-	memoryCompilerMigrated, memoryCompilerMigErr := config.MigrateLegacyMemoryCompilerForRoot(root)
-	cfg, err := config.LoadForRoot(root)
+	// written config + ~/.env are picked up this same boot. Broker-managed ACP
+	// workers skip every migration because the broker owns their isolated home.
+	var migrated *config.MigrationResult
+	var stepLimitsMigrated, redactToolOutputMigrated, memoryCompilerMigrated bool
+	var migErr, stepLimitMigErr, redactToolOutputMigErr, memoryCompilerMigErr error
+	var cfg *config.Config
+	if opts.BrokerManaged {
+		cfg, err = config.LoadBrokerManagedForRoot(root)
+	} else {
+		migrated, migErr = config.MigrateLegacyIfNeededForRoot(root)
+		stepLimitsMigrated, stepLimitMigErr = config.MigrateLegacyAgentStepLimitsForRoot(root)
+		redactToolOutputMigrated, redactToolOutputMigErr = config.MigrateLegacyRedactToolOutputForRoot(root)
+		memoryCompilerMigrated, memoryCompilerMigErr = config.MigrateLegacyMemoryCompilerForRoot(root)
+		cfg, err = config.LoadForRoot(root)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -593,7 +635,7 @@ func build(ctx context.Context, opts Options) (*BuildResult, error) {
 	// one-liner index into the same cache-stable prefix — names + descriptions
 	// only; bodies load on demand via run_skill or "/<name>". Bodies never enter
 	// the prefix, so the index costs a fixed, small amount per turn.
-	skillStore := skill.New(skill.Options{
+	skillOptions := skill.Options{
 		ProjectRoot:      root,
 		CustomPaths:      cfg.SkillCustomPaths(),
 		PluginPaths:      cfg.PluginPackageSkillOwners(),
@@ -602,17 +644,29 @@ func build(ctx context.Context, opts Options) (*BuildResult, error) {
 		DisabledNames:    cfg.DisabledSkillNames(),
 		MaxDepth:         cfg.SkillMaxDepth(),
 		Stderr:           opts.Stderr,
-	})
+	}
+	if opts.BrokerManaged {
+		skillOptions.ProjectRoot = ""
+		skillOptions.CustomPaths = nil
+		skillOptions.PluginPaths = nil
+		skillOptions.PluginAgentPaths = nil
+		skillOptions.ExcludedPaths = nil
+	}
+	skillStore := skill.New(skillOptions)
 	// Install the static profile filter before building the prompt index and
 	// dedicated skill tools. The dependency checker is attached once the live
 	// registry/plugin host has been assembled below.
 	skillStore.ConfigureInvocationPolicy(string(runtimeProfile), nil)
 	skills := skillStore.List()
-	allSkillStore := skill.New(skill.Options{ProjectRoot: root, CustomPaths: cfg.SkillCustomPaths(), PluginPaths: cfg.PluginPackageSkillOwners(), PluginAgentPaths: cfg.PluginPackageAgentOwners(), ExcludedPaths: cfg.SkillExcludedPaths(), MaxDepth: cfg.SkillMaxDepth(), Stderr: io.Discard})
+	allSkillOptions := skillOptions
+	allSkillOptions.DisabledNames = nil
+	allSkillOptions.Stderr = io.Discard
+	allSkillStore := skill.New(allSkillOptions)
 	allSkills := allSkillStore.List()
-	if !tokenEconomy {
+	if !tokenEconomy && opts.ToolAccess != ToolAccessDeny {
 		sysPrompt = skill.ApplyIndex(sysPrompt, skills)
 	}
+	sysPrompt = applyBrokerManagedToolPolicy(sysPrompt, opts.BrokerManaged, opts.ToolAccess)
 
 	reg := tool.NewRegistry()
 	writeRoots := cfg.WriteRootsForRoot(root)
@@ -926,7 +980,10 @@ func build(ctx context.Context, opts Options) (*BuildResult, error) {
 	// output is surfaced to the user as a Notice through the shared sink. The
 	// runner fires PreToolUse/PostToolUse in the agent loop and
 	// PermissionRequest/UserPromptSubmit/Stop at the controller boundary.
-	resolvedHooks := hook.Load(hook.LoadOptions{ProjectRoot: root})
+	var resolvedHooks []hook.ResolvedHook
+	if !opts.BrokerManaged {
+		resolvedHooks = hook.Load(hook.LoadOptions{ProjectRoot: root})
+	}
 	hookRuntime := hook.RuntimeOptions{}
 	if shell.Kind == sandbox.ShellBash {
 		hookRuntime.BashPath = shell.Path
@@ -1395,7 +1452,10 @@ func build(ctx context.Context, opts Options) (*BuildResult, error) {
 	}
 	// Custom slash commands (.reasonix/commands + user dir). Best-effort: a malformed
 	// file is skipped, and a load error never blocks the session.
-	cmds, _ := command.LoadRoots(config.CommandRootsForRoot(root)...)
+	var cmds []command.Command
+	if !opts.BrokerManaged {
+		cmds, _ = command.LoadRoots(config.CommandRootsForRoot(root)...)
+	}
 	slashCommandAdded := false
 	slashCommandIncludesSkills := false
 	addSlashCommandTool := func(includeSkills bool) string {
@@ -1764,7 +1824,13 @@ func build(ctx context.Context, opts Options) (*BuildResult, error) {
 	})
 
 	execSess := agent.NewSession(sysPrompt)
-	executor := agent.New(execProv, reg, execSess, agent.Options{
+	executionRegistry := reg
+	if opts.ToolAccess == ToolAccessReadOnly {
+		executionRegistry = agent.FilterReadOnlyRegistry(reg)
+	} else if opts.ToolAccess == ToolAccessDeny {
+		executionRegistry = tool.NewRegistry()
+	}
+	executorOptions := agent.Options{
 		MaxSteps:    maxSteps,
 		MaxStepsKey: opts.MaxStepsKey,
 		Temperature: cfg.Agent.Temperature,
@@ -1796,7 +1862,13 @@ func build(ctx context.Context, opts Options) (*BuildResult, error) {
 		SubagentDepth:                0,
 		MaxSubagentDepth:             maxSubagentDepth,
 		MissingReasoningWarnStateDir: config.MissingReasoningWarnStateDir(),
-	}, sink)
+	}
+	var executor *agent.Agent
+	if opts.ToolAccess == ToolAccessReadOnly {
+		executor = agent.NewReadOnlyAgent(execProv, executionRegistry, execSess, executorOptions, sink)
+	} else {
+		executor = agent.New(execProv, executionRegistry, execSess, executorOptions, sink)
+	}
 
 	var runner agent.Runner = executor
 	label := entry.Model
@@ -1887,7 +1959,7 @@ func build(ctx context.Context, opts Options) (*BuildResult, error) {
 		BalanceClient:         balanceClient,
 		Jobs:                  jm,
 		WorkspaceLease:        workspaceLease,
-		Registry:              reg,
+		Registry:              executionRegistry,
 		PluginCtx:             ctx,
 		MCPDefaultCallTimeout: pluginSpecOptions.DefaultCallTimeout,
 		MCPConfigureSpec: func(spec *plugin.Spec) {

@@ -41,8 +41,21 @@ func acpCommand(args []string, version string) int {
 	networkFlag := fs.String("sandbox-network", "auto", "sandbox network policy: auto | on | off")
 	bashFlag := fs.String("sandbox-bash", "auto", "bash sandbox policy: auto | enforce")
 	workspaceOnly := fs.Bool("workspace-only", false, "ignore configured extra write roots and confine writes to the session cwd")
+	brokerManaged := fs.Bool("broker-managed", false, "disable project-owned configuration and extension discovery")
+	toolAccessFlag := fs.String("tool-access", string(boot.ToolAccessAllow), "broker tool policy: allow | read-only | deny")
 	if code, ok := parseCommandFlags(fs, args); !ok {
 		return code
+	}
+	toolAccess := boot.ToolAccess(strings.ToLower(strings.TrimSpace(*toolAccessFlag)))
+	switch toolAccess {
+	case boot.ToolAccessAllow, boot.ToolAccessReadOnly, boot.ToolAccessDeny:
+	default:
+		fmt.Fprintln(os.Stderr, i18n.M.ErrorPrefix, "tool-access must be allow, read-only, or deny")
+		return 2
+	}
+	if toolAccess != boot.ToolAccessAllow && !*brokerManaged {
+		fmt.Fprintln(os.Stderr, i18n.M.ErrorPrefix, "tool-access requires --broker-managed")
+		return 2
 	}
 	plannerMode := strings.ToLower(strings.TrimSpace(*plannerFlag))
 	if plannerMode != "auto" && plannerMode != "off" {
@@ -81,6 +94,7 @@ func acpCommand(args []string, version string) int {
 		model: *model, profile: profile, plannerOff: plannerMode == "off",
 		networkOverride: networkOverride, workspaceOnly: *workspaceOnly,
 		bashOverride: bashMode, requireSandbox: bashMode == "enforce",
+		brokerManaged: *brokerManaged, toolAccess: toolAccess,
 	}
 	info := acp.AgentInfo{Name: "reasonix", Version: version}
 	if err := acp.Serve(ctx, os.Stdin, os.Stdout, factory, info); err != nil {
@@ -102,6 +116,8 @@ type acpFactory struct {
 	bashOverride     string
 	workspaceOnly    bool
 	requireSandbox   bool
+	brokerManaged    bool
+	toolAccess       boot.ToolAccess
 	sandboxAvailable func() bool
 }
 
@@ -112,10 +128,14 @@ func (f *acpFactory) SessionDir() string {
 // ablationSet maps the ACP --planner=off hard override onto the shared
 // subsystem switch boot consults.
 func (f *acpFactory) ablationSet() ablation.Set {
-	if f.plannerOff {
-		return ablation.New(ablation.Planner)
+	var disabled []ablation.Module
+	if f.plannerOff || f.brokerManaged {
+		disabled = append(disabled, ablation.Planner)
 	}
-	return ablation.Set{}
+	if f.brokerManaged {
+		disabled = append(disabled, ablation.Subagent)
+	}
+	return ablation.New(disabled...)
 }
 
 // NewSession assembles the per-session controller. Resources (MCP subprocesses)
@@ -164,6 +184,10 @@ func (f *acpFactory) sessionBootOptions(p acp.SessionParams) (boot.Options, erro
 	if f.bashOverride == "enforce" {
 		bashOverride = "enforce"
 	}
+	extraPlugins := p.MCPServers
+	if f.toolAccess == boot.ToolAccessDeny {
+		extraPlugins = nil
+	}
 	return boot.Options{
 		Model:                    firstNonEmpty(p.Model, f.model),
 		TokenMode:                firstNonEmpty(p.RuntimeProfile, f.profile),
@@ -173,7 +197,7 @@ func (f *acpFactory) sessionBootOptions(p acp.SessionParams) (boot.Options, erro
 		EffortOverride:           p.EffortOverride,
 		Stderr:                   os.Stderr,
 		WorkspaceRoot:            root,
-		ExtraPlugins:             p.MCPServers,
+		ExtraPlugins:             extraPlugins,
 		CleanupPendingReconciler: acp.ReconcileCleanupPending,
 		OnSessionRecovered:       p.OnSessionRecovered,
 		FileOverlay:              p.FileOverlay,
@@ -182,11 +206,13 @@ func (f *acpFactory) sessionBootOptions(p acp.SessionParams) (boot.Options, erro
 		SandboxNetworkOverride:   f.networkOverride,
 		SandboxBashOverride:      bashOverride,
 		WorkspaceOnly:            f.workspaceOnly,
+		BrokerManaged:            f.brokerManaged,
+		ToolAccess:               f.toolAccess,
 	}, nil
 }
 
 func (f *acpFactory) SessionRuntimeState(_ context.Context, p acp.SessionRuntimeStateParams) (acp.SessionRuntimeState, error) {
-	cfg, err := config.LoadForRoot(p.Cwd)
+	cfg, err := f.loadConfig(p.Cwd)
 	if err != nil {
 		return acp.SessionRuntimeState{}, err
 	}
@@ -274,9 +300,11 @@ func (f *acpFactory) SessionConfigState(_ context.Context, p acp.SessionConfigSt
 	if root != "" && !filepath.IsAbs(root) {
 		return acp.SessionConfigState{}, fmt.Errorf("session cwd must be an absolute path: %s", root)
 	}
-	_, _ = config.MigrateLegacyIfNeededForRoot(root)
-	_, _ = config.MigrateMCPToUserConfigOnUpgrade([]string{root})
-	cfg, err := config.LoadForRoot(root)
+	if !f.brokerManaged {
+		_, _ = config.MigrateLegacyIfNeededForRoot(root)
+		_, _ = config.MigrateMCPToUserConfigOnUpgrade([]string{root})
+	}
+	cfg, err := f.loadConfig(root)
 	if err != nil {
 		return acp.SessionConfigState{}, err
 	}
@@ -399,6 +427,13 @@ func (f *acpFactory) SessionConfigState(_ context.Context, p acp.SessionConfigSt
 		},
 		ConfigOptions: options,
 	}, nil
+}
+
+func (f *acpFactory) loadConfig(root string) (*config.Config, error) {
+	if f.brokerManaged {
+		return config.LoadBrokerManagedForRoot(root)
+	}
+	return config.LoadForRoot(root)
 }
 
 func acpRuntimeProfile(value string) string {
