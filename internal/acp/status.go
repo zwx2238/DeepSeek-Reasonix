@@ -99,16 +99,18 @@ type ReasonixFinalReadiness struct {
 }
 
 type ReasonixUsage struct {
-	PromptTokens     int      `json:"promptTokens"`
-	CompletionTokens int      `json:"completionTokens"`
-	ReasoningTokens  int      `json:"reasoningTokens"`
-	CacheHitTokens   int      `json:"cacheHitTokens"`
-	CacheMissTokens  int      `json:"cacheMissTokens"`
-	Estimated        bool     `json:"estimated,omitempty"`
-	CacheHitRatio    *float64 `json:"cacheHitRatio"`
-	EstimatedCost    *float64 `json:"estimatedCost"`
-	Currency         *string  `json:"currency"`
-	UsageSource      string   `json:"usageSource"`
+	PromptTokens            int      `json:"promptTokens"`
+	CompletionTokens        int      `json:"completionTokens"`
+	ReasoningTokens         int      `json:"reasoningTokens"`
+	CacheHitTokens          int      `json:"cacheHitTokens"`
+	CacheMissTokens         int      `json:"cacheMissTokens"`
+	ContextPromptTokens     int      `json:"contextPromptTokens"`
+	ContextCompletionTokens int      `json:"contextCompletionTokens"`
+	Estimated               bool     `json:"estimated,omitempty"`
+	CacheHitRatio           *float64 `json:"cacheHitRatio"`
+	EstimatedCost           *float64 `json:"estimatedCost"`
+	Currency                *string  `json:"currency"`
+	UsageSource             string   `json:"usageSource"`
 }
 
 type ReasonixStatusUsage struct {
@@ -145,17 +147,19 @@ type ReasonixStatusUpdate struct {
 }
 
 type usageAccumulator struct {
-	promptTokens     int
-	completionTokens int
-	reasoningTokens  int
-	cacheHitTokens   int
-	cacheMissTokens  int
-	estimated        bool
-	events           int
-	pricedEvents     int
-	estimatedCost    float64
-	currency         string
-	source           string
+	promptTokens            int
+	completionTokens        int
+	reasoningTokens         int
+	cacheHitTokens          int
+	cacheMissTokens         int
+	contextPromptTokens     int
+	contextCompletionTokens int
+	estimated               bool
+	events                  int
+	pricedEvents            int
+	estimatedCost           float64
+	currency                string
+	source                  string
 }
 
 func (a *usageAccumulator) add(u *provider.Usage, pricing *provider.Pricing, source string) {
@@ -167,6 +171,12 @@ func (a *usageAccumulator) add(u *provider.Usage, pricing *provider.Pricing, sou
 	a.reasoningTokens += u.ReasoningTokens
 	a.cacheHitTokens += u.CacheHitTokens
 	a.cacheMissTokens += u.CacheMissTokens
+	a.contextPromptTokens = u.ContextPromptTokens
+	a.contextCompletionTokens = u.ContextCompletionTokens
+	if a.contextPromptTokens == 0 && a.contextCompletionTokens == 0 {
+		a.contextPromptTokens = u.PromptTokens
+		a.contextCompletionTokens = u.CompletionTokens
+	}
 	a.estimated = a.estimated || u.Estimated
 	a.events++
 	source = strings.TrimSpace(source)
@@ -195,13 +205,15 @@ func (a *usageAccumulator) add(u *provider.Usage, pricing *provider.Pricing, sou
 
 func (a usageAccumulator) wire() ReasonixUsage {
 	usage := ReasonixUsage{
-		PromptTokens:     a.promptTokens,
-		CompletionTokens: a.completionTokens,
-		ReasoningTokens:  a.reasoningTokens,
-		CacheHitTokens:   a.cacheHitTokens,
-		CacheMissTokens:  a.cacheMissTokens,
-		Estimated:        a.estimated,
-		UsageSource:      a.source,
+		PromptTokens:            a.promptTokens,
+		CompletionTokens:        a.completionTokens,
+		ReasoningTokens:         a.reasoningTokens,
+		CacheHitTokens:          a.cacheHitTokens,
+		CacheMissTokens:         a.cacheMissTokens,
+		ContextPromptTokens:     a.contextPromptTokens,
+		ContextCompletionTokens: a.contextCompletionTokens,
+		Estimated:               a.estimated,
+		UsageSource:             a.source,
 	}
 	if usage.UsageSource == "" {
 		usage.UsageSource = event.UsageSourceExecutor
@@ -356,17 +368,19 @@ type statusTelemetrySnapshot struct {
 }
 
 type persistedUsageAccumulator struct {
-	PromptTokens     int     `json:"promptTokens"`
-	CompletionTokens int     `json:"completionTokens"`
-	ReasoningTokens  int     `json:"reasoningTokens"`
-	CacheHitTokens   int     `json:"cacheHitTokens"`
-	CacheMissTokens  int     `json:"cacheMissTokens"`
-	Estimated        bool    `json:"estimated,omitempty"`
-	Events           int     `json:"events"`
-	PricedEvents     int     `json:"pricedEvents"`
-	EstimatedCost    float64 `json:"estimatedCost"`
-	Currency         string  `json:"currency,omitempty"`
-	Source           string  `json:"source,omitempty"`
+	PromptTokens            int     `json:"promptTokens"`
+	CompletionTokens        int     `json:"completionTokens"`
+	ReasoningTokens         int     `json:"reasoningTokens"`
+	CacheHitTokens          int     `json:"cacheHitTokens"`
+	CacheMissTokens         int     `json:"cacheMissTokens"`
+	ContextPromptTokens     int     `json:"contextPromptTokens"`
+	ContextCompletionTokens int     `json:"contextCompletionTokens"`
+	Estimated               bool    `json:"estimated,omitempty"`
+	Events                  int     `json:"events"`
+	PricedEvents            int     `json:"pricedEvents"`
+	EstimatedCost           float64 `json:"estimatedCost"`
+	Currency                string  `json:"currency,omitempty"`
+	Source                  string  `json:"source,omitempty"`
 }
 
 type persistedStatusTelemetry struct {
@@ -384,7 +398,9 @@ func persistUsage(a usageAccumulator) persistedUsageAccumulator {
 	return persistedUsageAccumulator{
 		PromptTokens: a.promptTokens, CompletionTokens: a.completionTokens,
 		ReasoningTokens: a.reasoningTokens, CacheHitTokens: a.cacheHitTokens,
-		CacheMissTokens: a.cacheMissTokens, Estimated: a.estimated, Events: a.events,
+		CacheMissTokens:     a.cacheMissTokens,
+		ContextPromptTokens: a.contextPromptTokens, ContextCompletionTokens: a.contextCompletionTokens,
+		Estimated: a.estimated, Events: a.events,
 		PricedEvents: a.pricedEvents, EstimatedCost: a.estimatedCost,
 		Currency: a.currency, Source: a.source,
 	}
@@ -394,7 +410,9 @@ func restoreUsage(a persistedUsageAccumulator) usageAccumulator {
 	return usageAccumulator{
 		promptTokens: a.PromptTokens, completionTokens: a.CompletionTokens,
 		reasoningTokens: a.ReasoningTokens, cacheHitTokens: a.CacheHitTokens,
-		cacheMissTokens: a.CacheMissTokens, estimated: a.Estimated, events: a.Events,
+		cacheMissTokens:     a.CacheMissTokens,
+		contextPromptTokens: a.ContextPromptTokens, contextCompletionTokens: a.ContextCompletionTokens,
+		estimated: a.Estimated, events: a.Events,
 		pricedEvents: a.PricedEvents, estimatedCost: a.EstimatedCost,
 		currency: a.Currency, source: a.Source,
 	}

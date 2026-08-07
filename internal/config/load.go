@@ -62,6 +62,22 @@ func LoadUserConfigReadOnly() (*Config, error) {
 	return cfg, nil
 }
 
+// LoadBrokerManagedForRoot loads only the isolated Reasonix home owned by a
+// supervising broker. It deliberately ignores workspace reasonix.toml,
+// .mcp.json, installed plugin packages, and project .env expansion while still
+// resolving provider credentials from the Reasonix-global credential store.
+func LoadBrokerManagedForRoot(root string) (*Config, error) {
+	cfg, err := LoadUserConfigReadOnly()
+	if err != nil {
+		return nil, err
+	}
+	cfg.Plugins = nil
+	cfg.setExpansionEnv(nil)
+	cfg.CredentialsStore = credentialsStoreMode()
+	resolveProviderCredentialsForRoot(root, cfg)
+	return cfg, nil
+}
+
 func loadForRoot(root string, migrateOnDisk bool) (*Config, error) {
 	root = resolveRoot(root)
 	expansionEnv := loadDotEnvForRoot(root)
