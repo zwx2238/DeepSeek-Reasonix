@@ -74,9 +74,11 @@ func TestStatusExtensionTracksMultipleSessionsAndUsage(t *testing.T) {
 			sink.Emit(event.Event{Kind: event.Usage, Usage: &provider.Usage{
 				PromptTokens: 10, CompletionTokens: 4, ReasoningTokens: 2,
 				CacheHitTokens: 7, CacheMissTokens: 3, Estimated: true,
+				ContextPromptTokens: 8, ContextCompletionTokens: 3,
 			}, Pricing: &provider.Pricing{CacheHit: 0.1, Input: 1, Output: 2, Currency: "USD"}, UsageSource: event.UsageSourceExecutor})
 			sink.Emit(event.Event{Kind: event.Usage, Usage: &provider.Usage{
 				PromptTokens: 5, CompletionTokens: 1, CacheMissTokens: 5,
+				ContextPromptTokens: 4, ContextCompletionTokens: 1,
 			}, Pricing: &provider.Pricing{CacheHit: 0.1, Input: 1, Output: 2, Currency: "USD"}, UsageSource: event.UsageSourceCompaction})
 			sink.Emit(event.Event{Kind: event.Text, Text: input})
 			return nil
@@ -105,6 +107,9 @@ func TestStatusExtensionTracksMultipleSessionsAndUsage(t *testing.T) {
 	usage := firstStatus.Usage.Cumulative
 	if usage.PromptTokens != 15 || usage.CompletionTokens != 5 || usage.ReasoningTokens != 2 || usage.CacheHitTokens != 7 || usage.CacheMissTokens != 8 {
 		t.Fatalf("cumulative usage = %+v", usage)
+	}
+	if usage.ContextPromptTokens != 4 || usage.ContextCompletionTokens != 1 {
+		t.Fatalf("latest context usage = %+v, want 4 prompt + 1 completion", usage)
 	}
 	if usage.UsageSource != "mixed" || usage.CacheHitRatio == nil || usage.EstimatedCost == nil || usage.Currency == nil || *usage.Currency != "USD" {
 		t.Fatalf("usage metadata = %+v", usage)
@@ -200,7 +205,10 @@ func TestRestoreStatusMarksInterruptedTurnPaused(t *testing.T) {
 			ReadyForReview: true,
 			Risks:          []string{},
 		},
-		TurnUsage:  persistedUsageAccumulator{PromptTokens: 3, Estimated: true, Events: 1},
+		TurnUsage: persistedUsageAccumulator{
+			PromptTokens: 3, ContextPromptTokens: 2, ContextCompletionTokens: 1,
+			Estimated: true, Events: 1,
+		},
 		Cumulative: persistedUsageAccumulator{PromptTokens: 11, Estimated: true, Events: 2},
 	})
 	snapshot := restored.snapshot()
@@ -215,6 +223,9 @@ func TestRestoreStatusMarksInterruptedTurnPaused(t *testing.T) {
 	}
 	if snapshot.turnUsage.PromptTokens != 3 || snapshot.cumulative.PromptTokens != 11 {
 		t.Fatalf("interrupted usage was lost: turn=%+v cumulative=%+v", snapshot.turnUsage, snapshot.cumulative)
+	}
+	if snapshot.turnUsage.ContextPromptTokens != 2 || snapshot.turnUsage.ContextCompletionTokens != 1 {
+		t.Fatalf("interrupted context usage was lost: turn=%+v", snapshot.turnUsage)
 	}
 	if !snapshot.turnUsage.Estimated || !snapshot.cumulative.Estimated {
 		t.Fatalf("interrupted estimated marker was lost: turn=%+v cumulative=%+v", snapshot.turnUsage, snapshot.cumulative)
@@ -278,6 +289,7 @@ func TestStatusSnapshotSurvivesSessionResume(t *testing.T) {
 	telemetry.beginTurn()
 	telemetry.onEvent(event.Event{Kind: event.Usage, Usage: &provider.Usage{
 		PromptTokens: 8, CompletionTokens: 2, CacheHitTokens: 6, CacheMissTokens: 2,
+		ContextPromptTokens: 6, ContextCompletionTokens: 1,
 	}, UsageSource: event.UsageSourceExecutor})
 	telemetry.finishTurn(nil, false, "", "persisted summary")
 	path := filepath.Join(dir, sessionID+".jsonl")
@@ -303,6 +315,9 @@ func TestStatusSnapshotSurvivesSessionResume(t *testing.T) {
 	after := getStatus(t, reconnected, sessionID)
 	if after.Sequence != telemetry.snapshot().sequence || after.Usage.Cumulative.PromptTokens != 8 || after.State != "idle" || after.FinalReadiness.Summary != "persisted summary" {
 		t.Fatalf("recovered status = %+v", after)
+	}
+	if after.Usage.Cumulative.ContextPromptTokens != 6 || after.Usage.Cumulative.ContextCompletionTokens != 1 {
+		t.Fatalf("recovered context usage = %+v", after.Usage.Cumulative)
 	}
 }
 
