@@ -7,10 +7,13 @@ import (
 	"strings"
 	"testing"
 
+	"reasonix/internal/ablation"
 	"reasonix/internal/acp"
+	"reasonix/internal/boot"
 	"reasonix/internal/config"
 	"reasonix/internal/event"
 	"reasonix/internal/netclient"
+	"reasonix/internal/plugin"
 	"reasonix/internal/provider"
 	"reasonix/internal/tool"
 
@@ -74,10 +77,39 @@ func TestACPRejectsInvalidSupervisorFlags(t *testing.T) {
 		{"--planner=maybe"},
 		{"--sandbox-network=maybe"},
 		{"--sandbox-bash=maybe"},
+		{"--tool-access=maybe"},
+		{"--tool-access=read-only"},
 	} {
 		if rc := acpCommand(args, "test-version"); rc != 2 {
 			t.Fatalf("acpCommand(%v) rc = %d, want 2", args, rc)
 		}
+	}
+}
+
+func TestACPBrokerManagedBootOptionsEnforceToolPolicy(t *testing.T) {
+	project := t.TempDir()
+	factory := &acpFactory{
+		brokerManaged: true,
+		toolAccess:    boot.ToolAccessDeny,
+	}
+	opts, err := factory.sessionBootOptions(acp.SessionParams{
+		Cwd: project,
+		MCPServers: []plugin.Spec{{
+			Name:    "project-mcp",
+			Command: "project-owned-command",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("sessionBootOptions: %v", err)
+	}
+	if !opts.BrokerManaged || opts.ToolAccess != boot.ToolAccessDeny {
+		t.Fatalf("managed tool policy = managed:%v access:%q", opts.BrokerManaged, opts.ToolAccess)
+	}
+	if len(opts.ExtraPlugins) != 0 {
+		t.Fatalf("deny ExtraPlugins = %+v, want none", opts.ExtraPlugins)
+	}
+	if !opts.Ablation.Off(ablation.Planner) || !opts.Ablation.Off(ablation.Subagent) {
+		t.Fatalf("managed ablation = %s, want planner and subagent disabled", opts.Ablation)
 	}
 }
 
@@ -200,6 +232,68 @@ api_key_env = "REASONIX_TEST_KEY"
 		}
 	}
 	t.Fatalf("ACP session did not load project command from cwd; commands=%v", ctrl.Commands())
+}
+
+func TestACPBrokerManagedFactoryIgnoresProjectCommandsAndConfig(t *testing.T) {
+	isolateCLIConfigHome(t)
+	if _, err := config.SetCredential("REASONIX_TEST_KEY", "test-key"); err != nil {
+		t.Fatalf("SetCredential: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(config.UserConfigPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.UserConfigPath(), []byte(`
+default_model = "managed"
+
+[[providers]]
+name = "managed"
+kind = "acp-test-provider"
+base_url = "http://example.invalid"
+model = "managed-model"
+api_key_env = "REASONIX_TEST_KEY"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, "reasonix.toml"), []byte(`
+default_model = "project"
+
+[[providers]]
+name = "project"
+kind = "acp-test-provider"
+base_url = "http://project.invalid"
+model = "project-model"
+api_key_env = "REASONIX_TEST_KEY"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmdDir := filepath.Join(project, ".reasonix", "commands")
+	if err := os.MkdirAll(cmdDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cmdDir, "project-only.md"), []byte("project command"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	factory := &acpFactory{brokerManaged: true, toolAccess: boot.ToolAccessAllow}
+	state, err := factory.SessionConfigState(context.Background(), acp.SessionConfigStateParams{Cwd: project})
+	if err != nil {
+		t.Fatalf("SessionConfigState: %v", err)
+	}
+	if state.Model != "managed/managed-model" {
+		t.Fatalf("managed model = %q, want managed/managed-model", state.Model)
+	}
+
+	ctrl, err := factory.NewSession(context.Background(), acp.SessionParams{Cwd: project, Sink: event.Discard})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer ctrl.Close()
+	for _, cmd := range ctrl.Commands() {
+		if cmd.Name == "project-only" {
+			t.Fatal("broker-managed session loaded a project command")
+		}
+	}
 }
 
 func TestACPFactoryClearsEffortOverrideForUnsupportedModel(t *testing.T) {
