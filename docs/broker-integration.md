@@ -116,14 +116,14 @@
 - `provider.Usage.Context*`：上游原生（`internal/agent/usage_context.go` 的
   `applyLatestContextShape`），P5 只做 wire 外显。
 - `ablation.Subagent`：上游原生开关。
-- 本地 subagent 模块定制：经 `git diff 471d62a2d..HEAD` 核实不存在（fork 从未改过
+- 本地 subagent 模块定制：经 `git diff f12cbdd2f..HEAD` 核实不存在（fork 从未改过
   `internal/agent/task.go` 等 subagent 实现），无需删除。
 - 旧的 `skill.ApplyIndex`/tokenEconomy 相关本地分支随上游技能装配重构自然消失。
 
 ## 构建与验证
 
-工具链：Go ≥1.26（主仓 `scripts/stage-backend-artifacts.mjs` 固定 `go@1.26.5`，
-可用 `mise exec go@1.26.5 -- go` 或绝对路径；根分区紧张时把 `GOCACHE`/`TMPDIR`
+工具链：上游 `go.mod` 要求 `toolchain go1.26.6`；主仓同步锁定 `go@1.26.6`，
+可用 `mise exec go@1.26.6 -- go` 或绝对路径；根分区紧张时把 `GOCACHE`/`TMPDIR`
 指到大盘）。
 
 ```sh
