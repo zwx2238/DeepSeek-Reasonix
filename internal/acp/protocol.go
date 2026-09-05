@@ -639,6 +639,13 @@ type currentModeUpdate struct {
 	CurrentModeID string `json:"currentModeId"`
 }
 
+// usageUpdate reports the backend-restored current context occupancy.
+type usageUpdate struct {
+	SessionUpdate string `json:"sessionUpdate"`
+	Used          int    `json:"used"`
+	Size          int    `json:"size"`
+}
+
 // --- fs/* (agent → client requests) ---
 
 // FSReadTextFileParams asks the client for a file's current text, including

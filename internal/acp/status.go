@@ -171,6 +171,8 @@ func (a *usageAccumulator) add(u *provider.Usage, pricing *provider.Pricing, sou
 	a.reasoningTokens += u.ReasoningTokens
 	a.cacheHitTokens += u.CacheHitTokens
 	a.cacheMissTokens += u.CacheMissTokens
+	// Context fields are a latest-request gauge, unlike the cumulative
+	// billable counters above.
 	a.contextPromptTokens = u.ContextPromptTokens
 	a.contextCompletionTokens = u.ContextCompletionTokens
 	if a.contextPromptTokens == 0 && a.contextCompletionTokens == 0 {

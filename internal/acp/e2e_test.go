@@ -74,10 +74,11 @@ func (t fakeTool) Execute(context.Context, json.RawMessage) (string, error) {
 // e2eFactory builds a real Controller around a real Agent driven by the scripted
 // provider, with the fake tool registered and a transcript dir for persistence.
 type e2eFactory struct {
-	prov       provider.Provider
-	tool       tool.Tool
-	policy     permission.Policy
-	sessionDir string
+	prov          provider.Provider
+	tool          tool.Tool
+	policy        permission.Policy
+	sessionDir    string
+	contextWindow int
 }
 
 func (f *e2eFactory) SessionDir() string { return f.sessionDir }
@@ -86,7 +87,7 @@ func (f *e2eFactory) NewSession(_ context.Context, p SessionParams) (*control.Co
 	reg := tool.NewRegistry()
 	reg.Add(f.tool)
 	executor := agent.New(f.prov, reg, agent.NewSession("you are a test agent"),
-		agent.Options{MaxSteps: 5}, p.Sink)
+		agent.Options{MaxSteps: 5, ContextWindow: f.contextWindow}, p.Sink)
 	return control.New(control.Options{
 		Runner:     executor,
 		Executor:   executor,
@@ -223,11 +224,19 @@ func TestE2ESessionLoad(t *testing.T) {
 					toolCallChunk("c1", "peek", `{"path":"x"}`),
 					{Type: provider.ChunkDone},
 				},
-				{{Type: provider.ChunkText, Text: "All done."}, {Type: provider.ChunkDone}},
+				{
+					{Type: provider.ChunkText, Text: "All done."},
+					{Type: provider.ChunkUsage, Usage: &provider.Usage{
+						PromptTokens: 90, CompletionTokens: 10, TotalTokens: 100,
+						ContextPromptTokens: 80, ContextCompletionTokens: 10,
+					}},
+					{Type: provider.ChunkDone},
+				},
 			}},
-			tool:       fakeTool{name: "peek", ro: true, out: "file contents here"},
-			policy:     permission.New("ask", nil, nil, nil),
-			sessionDir: dir,
+			tool:          fakeTool{name: "peek", ro: true, out: "file contents here"},
+			policy:        permission.New("ask", nil, nil, nil),
+			sessionDir:    dir,
+			contextWindow: 200_000,
 		}
 	}
 
@@ -279,6 +288,23 @@ func TestE2ESessionLoad(t *testing.T) {
 	if kinds["tool_call"] != 1 || kinds["tool_call_update"] != 1 {
 		t.Errorf("tool replay = %v, want 1 tool_call + 1 tool_call_update", kinds)
 	}
+	if kinds["usage_update"] != 1 {
+		t.Fatalf("usage replay = %v, want one usage_update", kinds)
+	}
+	for _, n := range notifs {
+		if updateKind(t, n) != "usage_update" {
+			continue
+		}
+		var p struct {
+			Update usageUpdate `json:"update"`
+		}
+		if err := json.Unmarshal(n.Params, &p); err != nil {
+			t.Fatalf("usage_update: %v", err)
+		}
+		if p.Update.Used != 100 || p.Update.Size != 200_000 {
+			t.Fatalf("usage_update = %+v, want used=100 size=200000", p.Update)
+		}
+	}
 }
 
 func TestE2ESessionListResumeAndDelete(t *testing.T) {
@@ -287,11 +313,19 @@ func TestE2ESessionListResumeAndDelete(t *testing.T) {
 	mkFactory := func() *e2eFactory {
 		return &e2eFactory{
 			prov: &scriptedProvider{name: "fake", responses: [][]provider.Chunk{
-				{{Type: provider.ChunkText, Text: "Stored answer."}, {Type: provider.ChunkDone}},
+				{
+					{Type: provider.ChunkText, Text: "Stored answer."},
+					{Type: provider.ChunkUsage, Usage: &provider.Usage{
+						PromptTokens: 90, CompletionTokens: 10, TotalTokens: 100,
+						ContextPromptTokens: 80, ContextCompletionTokens: 10,
+					}},
+					{Type: provider.ChunkDone},
+				},
 			}},
-			tool:       fakeTool{name: "peek", ro: true, out: "unused"},
-			policy:     permission.New("ask", nil, nil, nil),
-			sessionDir: dir,
+			tool:          fakeTool{name: "peek", ro: true, out: "unused"},
+			policy:        permission.New("ask", nil, nil, nil),
+			sessionDir:    dir,
+			contextWindow: 200_000,
 		}
 	}
 
@@ -339,14 +373,22 @@ func TestE2ESessionListResumeAndDelete(t *testing.T) {
 		t.Fatal("listed session missing updatedAt")
 	}
 
-	resumeResp := client2.call(t, "session/resume", SessionResumeParams{SessionID: nr.SessionID, Cwd: cwd})
+	resumeCh := client2.callAsync("session/resume", SessionResumeParams{SessionID: nr.SessionID, Cwd: cwd})
+	resumeNotifs, resumeResp := drainPrompt(t, client2, resumeCh)
 	if resumeResp.Error != nil {
 		t.Fatalf("session/resume errored: %+v", resumeResp.Error)
 	}
-	select {
-	case n := <-client2.notifs:
-		t.Fatalf("session/resume replayed an unexpected notification: %+v", n)
-	default:
+	if len(resumeNotifs) != 1 || updateKind(t, resumeNotifs[0]) != "usage_update" {
+		t.Fatalf("session/resume notifications = %+v, want one usage_update and no transcript replay", resumeNotifs)
+	}
+	var usageParams struct {
+		Update usageUpdate `json:"update"`
+	}
+	if err := json.Unmarshal(resumeNotifs[0].Params, &usageParams); err != nil {
+		t.Fatalf("session/resume usage_update: %v", err)
+	}
+	if usageParams.Update.Used != 100 || usageParams.Update.Size != 200_000 {
+		t.Fatalf("session/resume usage_update = %+v, want used=100 size=200000", usageParams.Update)
 	}
 
 	deleteResp := client2.call(t, "session/delete", SessionDeleteParams{SessionID: nr.SessionID})

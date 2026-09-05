@@ -920,16 +920,17 @@ func (s *service) openExistingSession(ctx context.Context, method, id, cwdParam 
 		if agent.IsCleanupPending(sess.transcript) {
 			return SessionConfigState{}, &RPCError{Code: ErrInvalidParams, Message: method + ": unknown session " + id}
 		}
+		replaySink := newUpdateSink(s.conn, id)
+		replaySink.bindCwd(sess.cwd)
 		if replay {
 			ctrl := sess.currentCtrl()
-			replaySink := newUpdateSink(s.conn, id)
-			replaySink.bindCwd(sess.cwd)
 			replaySink.replay(ctrl.History())
 		}
 		cfgState, err := s.configStateForSession(ctx, sess)
 		if err != nil {
 			return SessionConfigState{}, &RPCError{Code: ErrInternal, Message: method + ": " + err.Error()}
 		}
+		s.emitUsageSnapshot(sess, replaySink)
 		return cfgState, nil
 	}
 
@@ -1071,7 +1072,35 @@ func (s *service) openExistingSession(ctx context.Context, method, id, cwdParam 
 	if replay {
 		sink.replay(ctrl.History())
 	}
+	s.emitUsageSnapshot(sess, sink)
 	return enrichStateWithExtensionModels(cfgState, ctrl.ProviderCatalog()), nil
+}
+
+func (s *service) emitUsageSnapshot(sess *acpSession, sink *updateSink) {
+	if sess == nil || sink == nil {
+		return
+	}
+	status := sess.statusSnapshot()
+	used := status.Usage.Cumulative.ContextPromptTokens +
+		status.Usage.Cumulative.ContextCompletionTokens
+	size := 0
+	if ctrl := sess.currentCtrl(); ctrl != nil {
+		if snapshotter, ok := ctrl.(interface{ ContextSnapshot() (int, int) }); ok {
+			liveUsed, contextWindow := snapshotter.ContextSnapshot()
+			size = contextWindow
+			if used <= 0 {
+				used = liveUsed
+			}
+		}
+	}
+	if used <= 0 || size <= 0 {
+		return
+	}
+	sink.send(usageUpdate{
+		SessionUpdate: "usage_update",
+		Used:          used,
+		Size:          size,
+	})
 }
 
 // transcriptPath is where a session's transcript lives — keyed by id so
