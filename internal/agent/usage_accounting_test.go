@@ -88,8 +88,12 @@ func TestFinalizeSamplingUsageKeepsLatestPromptContext(t *testing.T) {
 	if got.ContextPromptTokens != 30000 || got.ContextCompletionTokens != 10 {
 		t.Fatalf("context shape = prompt %d completion %d, want latest 30000/10", got.ContextPromptTokens, got.ContextCompletionTokens)
 	}
-	if got.ContextFillTokens() != 30010 {
-		t.Fatalf("ContextFillTokens = %d, want 30010", got.ContextFillTokens())
+	if got.ContextFillTokens() != 30000 {
+		t.Fatalf("ContextFillTokens = %d, want 30000", got.ContextFillTokens())
+	}
+	completionOnly := &provider.Usage{PromptTokens: 500, ContextCompletionTokens: 20}
+	if fill := completionOnly.ContextFillTokens(); fill != 500 {
+		t.Fatalf("completion-only ContextFillTokens = %d, want prompt fallback 500", fill)
 	}
 	if got.CompletionTokens != 30 || got.RequestCount != 3 {
 		t.Fatalf("billable fields = %+v, want summed completion/requests", got)
@@ -164,14 +168,14 @@ func TestStreamReturnsRequestOnlyUsageOnProviderFailure(t *testing.T) {
 	sink := event.FuncSink(func(e event.Event) { events = append(events, e) })
 	a := New(failedRequestProvider{}, tool.NewRegistry(), NewSession(""), Options{ModelRef: "failed/model"}, sink)
 
-	_, _, _, _, _, _, _, usage, _, _, _, _, err := a.stream(context.Background(), 1, sink)
-	if err == nil {
+	st := a.stream(context.Background(), 1, sink)
+	if st.err == nil {
 		t.Fatal("expected provider failure")
 	}
-	if usage == nil || usage.TotalTokens != 0 || usage.RequestCount != 1 {
-		t.Fatalf("failed stream usage = %+v, want tokens=0 requests=1", usage)
+	if st.usage == nil || st.usage.TotalTokens != 0 || st.usage.RequestCount != 1 {
+		t.Fatalf("failed stream usage = %+v, want tokens=0 requests=1", st.usage)
 	}
-	a.emitTurnUsage(usage, nil)
+	a.emitTurnUsage(st.usage, nil)
 	if len(events) != 1 || events[0].Kind != event.Usage || events[0].Usage.RequestCount != 1 {
 		t.Fatalf("request-only usage event = %+v", events)
 	}

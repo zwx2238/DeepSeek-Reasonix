@@ -7,14 +7,14 @@ import { createBoundedRefreshCoordinator, sameTabMetaLists, shouldRefreshTabMeta
 import type { TabMeta } from "../lib/types";
 
 const testDir = dirname(fileURLToPath(import.meta.url));
-const appSource = readFileSync(resolve(testDir, "../App.tsx"), "utf8");
+const appSource = readFileSync(resolve(testDir, "../App.tsx"), "utf8"), workspaceFocusSource = readFileSync(resolve(testDir, "../lib/workspaceRefreshStore.ts"), "utf8");
 const appChromeSource = readFileSync(resolve(testDir, "../components/AppChrome.tsx"), "utf8");
 const commandPaletteSource = readFileSync(resolve(testDir, "../components/CommandPalette.tsx"), "utf8");
 const projectTreeSource = readFileSync(resolve(testDir, "../components/ProjectTree.tsx"), "utf8");
 const topicShortcutsSource = readFileSync(resolve(testDir, "../lib/topicShortcuts.ts"), "utf8");
 const transcriptSource = readFileSync(resolve(testDir, "../components/Transcript.tsx"), "utf8");
 const composerSource = readFileSync(resolve(testDir, "../components/Composer.tsx"), "utf8");
-const controllerSource = readFileSync(resolve(testDir, "../lib/useController.ts"), "utf8");
+const controllerSource = readFileSync(resolve(testDir, "../lib/useController.ts"), "utf8"), forkWorktreeSource = readFileSync(resolve(testDir, "../lib/forkWorktree.ts"), "utf8");
 const bridgeSource = readFileSync(resolve(testDir, "../lib/bridge.ts"), "utf8");
 const workspacePanelSource = readFileSync(resolve(testDir, "../components/WorkspacePanel.tsx"), "utf8");
 const rewindCommitSource = readFileSync(resolve(testDir, "../lib/rewindCommit.ts"), "utf8");
@@ -226,10 +226,10 @@ ok(!shouldRefreshTabMetaForEvent("text_delta"), "stream deltas do not trigger ta
 }
 
 ok(
-  !appSource.includes("setInterval(() => void refreshTabMetas(), 2000)") &&
-    appSource.includes('document.addEventListener("visibilitychange", onVisibilityChange)') &&
+  !appSource.includes("setInterval(() => void refreshTabMetas(), 2000)") && appSource.includes('import("./lib/workspaceRefreshStore")') &&
+    workspaceFocusSource.includes('document.addEventListener("visibilitychange", onVisibilityChange)') &&
     appSource.includes("createBoundedRefreshCoordinator<TabMeta[]>(TAB_META_MAX_IN_FLIGHT)") &&
-    appSource.includes("void refreshTabMetas();\n        schedule();"),
+    /void refreshTabMetas\(\);\s+schedule\(\);/.test(workspaceFocusSource),
   "tab metadata refresh is event-driven with a visibility-aware fallback",
 );
 
@@ -279,10 +279,10 @@ ok(
 
 ok(
   /const WORKSPACE_PANEL_DEFAULT_OPEN = true;/.test(layoutStoreSource) &&
-    /workspacePanelOpen:\s*loadWorkspacePanelOpen\(\)/.test(layoutStoreSource) &&
-    /export function saveWorkspacePanelOpen\(open: boolean\)/.test(layoutStoreSource) &&
+    /workspacePanelOpen:\s*loadWorkspacePanelOpen\(""\)/.test(layoutStoreSource) &&
+    /export function saveWorkspacePanelOpen\(open: boolean, workspaceRoot = ""\)/.test(layoutStoreSource) &&
     /reasonix\.workspacePanel\.open/.test(layoutStoreSource),
-  "right dock open state is restored from localStorage with expanded first-launch default",
+  "right dock open state is restored from per-project localStorage with expanded first-launch default",
 );
 
 ok(
@@ -425,7 +425,7 @@ ok(
 );
 
 ok(
-  /const \[rewindStatesByTab, setRewindStatesByTab\] = useState<Record<string, RewindState>>\(\{\}\);/.test(appSource) &&
+  /const \[rewindStatesByTab, setRewindStatesByTab\] = useState<Record<string, RewindUndoState>>\(\{\}\);/.test(appSource) &&
     /setRewindStateForTab\(sourceTabId, null\);/.test(appSource) &&
     /setRewindCommittingForTab\(sourceTabId, true\);/.test(appSource),
   "committing optimistic rewind clears only the source tab before awaiting the backend",
@@ -447,7 +447,7 @@ ok(
   /const controllerReady =\s*state\.meta\?\.ready === true &&\s*\(!state\.meta\.runtime \|\| state\.meta\.runtime\.phase === "ready"\) &&\s*!state\.meta\.startupErr &&\s*!state\.backendActivationPending &&\s*!runtimeTransitioning;/.test(appSource) &&
     /if \(!activeTabId \|\| !controllerReady\) return;\s*void commitThenSend\(activeTabId, text\)\.catch/.test(appSource) &&
     /onPrompt=\{handleTranscriptPrompt\}/.test(appSource) &&
-    /submitDisabled=\{!controllerReady\}/.test(appSource),
+    /submitDisabled=\{remoteSurfaceActive \? !remoteComposerReady \|\| !remoteComposerProfileReady : !controllerReady\}/.test(appSource),
   "welcome prompts and composer submit share the controller readiness gate",
 );
 
@@ -483,7 +483,7 @@ ok(
     /app\.PreviewRewindForTab\(sourceTabId, turn, scope\)/.test(rewindCommitSource) &&
     /app\.CommitRewindForTab\(sourceTabId, remoteLegacy \? "" : \(plan\.planId \|\| ""\), turn, scope\)/.test(rewindCommitSource) &&
     /app\.UndoRewindForTab\(sourceTabId, transactionId\)/.test(rewindCommitSource) &&
-    /app\.ForkForTab\(sourceTabId, turn\)/.test(controllerSource) &&
+    /bindings\.ForkForTab\(sourceTabId, turn\)[\s\S]*bindings\.ForkWorktreeForTab\(sourceTabId, turn\)/.test(forkWorktreeSource) &&
     /app\.SummarizeFromForTab\(sourceTabId, turn\)/.test(controllerSource) &&
     /NewSessionForTab\(tabID: string\)/.test(bridgeSource) &&
     /CompactForTab\(tabID: string\)/.test(bridgeSource) &&
@@ -500,10 +500,10 @@ ok(
   "rewind previews warn on incomplete coverage and only authorize file overwrite after a conflict confirmation",
 );
 
-ok(
-  /const transcriptHydrating = state\.hydrating && !state\.hydrateHistoryLoaded;/.test(appSource) &&
-    /hydrating=\{transcriptHydrating\}/.test(appSource),
-  "Welcome is suppressed only until transcript history has loaded",
+ok(/const transcriptHydrating = state\.hydrating && !state\.hydrateHistoryLoaded;/.test(appSource) &&
+    /hydrating=\{transcriptHydrating \|\| \(runtimeTransitioning && !navigationTargetDataReady\)\}/.test(appSource) &&
+    /surfaceCommitToken=\{surfaceCommitToken\}/.test(appSource) && /onSurfacePaintReady=\{handleSurfacePaintReady\}/.test(appSource),
+  "Welcome stays suppressed through target data commit and navigation settles only after paint readiness",
 );
 
 ok(
@@ -517,7 +517,7 @@ ok(
 );
 
 ok(
-  /if \(heroMode\) \{[\s\S]*?const maxHeight = 96;[\s\S]*?setTextareaAutoHeight/.test(composerSource) &&
+  /if \(heroMode\) \{[\s\S]*?const maxHeight = composerHeroInputMaxHeight\(\);[\s\S]*?setTextareaAutoHeight/.test(composerSource) &&
     !/if \(heroMode\) \{\s*setTextareaAutoHeight\(20\);/.test(composerSource),
   "Creation hero composer auto-grows multi-line drafts instead of clipping at 20px",
 );
@@ -566,12 +566,20 @@ ok(
 );
 
 ok(
+  /const enterChatViewForTabNavigation = useCallback\(\(\) => \{\s*setMainView\("chat"\);/.test(appSource) &&
+    /const enqueueTabSwitch = useCallback\([\s\S]*?enterChatViewForTabNavigation\(\);[\s\S]*?enqueueNavigationRequest/.test(appSource) &&
+    /const revealBackgroundRuntime = useCallback[\s\S]*?enterChatViewForTabNavigation\(\);[\s\S]*?RevealBackgroundRuntime/.test(appSource) &&
+    /const revealWorkspaceWriter = useCallback[\s\S]*?enterChatViewForTabNavigation\(\);[\s\S]*?RevealWorkspaceWriterForTab/.test(appSource),
+  "every direct tab activation returns overlay pages to the chat view",
+);
+
+ok(
   !/await resumeSession\(session\.path, targetTab\.id\);/.test(navigationBlock),
   "history navigation does not re-resume a session that OpenTopicSession already pinned",
 );
 
 ok(
-  /<HeartbeatPanel[\s\S]*onOpenTopic=\{\(scope, workspaceRoot, topicId\) => \{[\s\S]*void handleOpenTopic\(scope, workspaceRoot, topicId\);[\s\S]*\}\}/.test(appSource),
+  /<HeartbeatView[\s\S]*onOpenTopic=\{\(scope, workspaceRoot, topicId\) => \{[\s\S]*void handleOpenTopic\(scope, workspaceRoot, topicId\);[\s\S]*\}\}/.test(appSource),
   "heartbeat topic navigation uses the guarded open-topic path",
 );
 
@@ -689,8 +697,8 @@ ok(
 );
 
 ok(
-  finalDeclaration(":root[data-theme-style] .workbench-dock__tab--active::after", "bottom") === "1px",
-  "active dock underline stays inside the visible dock edge",
+  finalDeclaration(":root[data-theme-style] .workbench-dock__tab--active::after", "display") === "none",
+  "active dock tab underline is removed in favor of the rounded-rect selected state",
 );
 
 for (const selector of [

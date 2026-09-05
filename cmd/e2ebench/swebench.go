@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"reasonix/internal/ablation"
@@ -58,7 +59,7 @@ func permissionFlag(mode string) (string, error) {
 	}
 }
 
-func swebenchAgentArgs(metricsPath, model, profile, permission string, arm ablation.Set, maxSteps int, prompt string) []string {
+func swebenchAgentArgs(metricsPath, model, permission string, arm ablation.Set, maxSteps int, prompt string) []string {
 	posture, err := permissionFlag(permission)
 	if err != nil {
 		panic(err) // validated at flag-parse time; reaching here is a wiring bug
@@ -70,7 +71,6 @@ func swebenchAgentArgs(metricsPath, model, profile, permission string, arm ablat
 	if maxSteps > 0 {
 		args = append(args, "--max-steps", fmt.Sprint(maxSteps))
 	}
-	args = appendBenchmarkProfileArgs(args, profile)
 	if !arm.Empty() {
 		args = append(args, "--ablate", arm.String())
 	}
@@ -137,30 +137,20 @@ func swebenchReportPath(model, runID string) string {
 // taxonomy. An id the grader never mentions is reported as unknown rather than
 // silently counted as unsolved.
 func (r swebenchReport) gradedClass(instanceID string) string {
-	for _, id := range r.ResolvedIDs {
-		if id == instanceID {
-			return "solved"
-		}
+	if slices.Contains(r.ResolvedIDs, instanceID) {
+		return "solved"
 	}
-	for _, id := range r.EmptyPatchIDs {
-		if id == instanceID {
-			return "no_patch"
-		}
+	if slices.Contains(r.EmptyPatchIDs, instanceID) {
+		return "no_patch"
 	}
-	for _, id := range r.ErrorIDs {
-		if id == instanceID {
-			return "grader_error"
-		}
+	if slices.Contains(r.ErrorIDs, instanceID) {
+		return "grader_error"
 	}
-	for _, id := range r.IncompleteIDs {
-		if id == instanceID {
-			return "eval_timeout"
-		}
+	if slices.Contains(r.IncompleteIDs, instanceID) {
+		return "eval_timeout"
 	}
-	for _, id := range r.UnresolvedIDs {
-		if id == instanceID {
-			return "wrong_patch"
-		}
+	if slices.Contains(r.UnresolvedIDs, instanceID) {
+		return "wrong_patch"
 	}
 	return "ungraded"
 }

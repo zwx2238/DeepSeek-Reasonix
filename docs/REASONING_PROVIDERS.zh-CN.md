@@ -16,8 +16,8 @@ Reasonix 只暴露一个 `/effort` 开关（以及 provider 级的 `effort` / `t
 
 | Provider          | Base URL                                                    | 推理控制                                     | `/effort` 档位                           | 备注 |
 |-------------------|-------------------------------------------------------------|----------------------------------------------|------------------------------------------|-------|
-| DeepSeek V4 Flash | `api.deepseek.com`、`*.deepseek.com`                        | `thinking.type` + `reasoning_effort`（深度） | `auto`、`disabled`、`low`、`high`、`max` | 默认开启思考；`disabled` 通过 `thinking.type=disabled` 关闭。兼容性输入 `medium` 归一化为 `high`，`xhigh` 归一化为 `high`。 |
-| DeepSeek V4 Pro   | `api.deepseek.com`、`*.deepseek.com`                        | `thinking.type` + `reasoning_effort`（深度） | `auto`、`disabled`、`high`、`max`        | 默认开启思考；`disabled` 通过 `thinking.type=disabled` 关闭。兼容性输入 `low`/`medium` 归一化为 `high`，`xhigh` 归一化为 `max`。 |
+| DeepSeek V4 Flash | `api.deepseek.com`、`*.deepseek.com`                        | `thinking.type` + `reasoning_effort`（深度） | `auto`、`disabled`、`low`、`high`、`max` | 默认开启思考；`disabled` 通过 `thinking.type=disabled` 关闭。兼容性输入 `medium` 归一化为 `high`，`xhigh` 归一化为 `high`。请求携带 tools 时，历史 assistant 轮次只要携带 reasoning 都会回传，即使该轮没有工具调用；不带 tools 时该字段会被 DeepSeek 忽略。 |
+| DeepSeek V4 Pro   | `api.deepseek.com`、`*.deepseek.com`                        | `thinking.type` + `reasoning_effort`（深度） | `auto`、`disabled`、`low`、`high`、`max` | 默认开启思考；`disabled` 通过 `thinking.type=disabled` 关闭。兼容性输入 `medium`、`xhigh` 归一化为 `high`。请求携带 tools 时，历史 assistant 轮次只要携带 reasoning 都会回传，即使该轮没有工具调用；不带 tools 时该字段会被 DeepSeek 忽略。 |
 | MiniMax M3        | `api.minimaxi.com`、`*.minimaxi.com`                        | `thinking.type`（`adaptive`\|`disabled`）    | `auto`、`adaptive`、`disabled`           | 无深度档位；`reasoning_effort` 会被省略。 |
 | Zhipu GLM         | `open.bigmodel.cn` / `*.bigmodel.cn`、`api.z.ai` / `*.z.ai` | `thinking.type`（`enabled`\|`disabled`）     | `auto`、`enabled`、`disabled`            | **端点会静默忽略 `reasoning_effort`**，因此推理完全由 `thinking.type` 驱动。 |
 
@@ -26,6 +26,7 @@ Reasonix 只暴露一个 `/effort` 开关（以及 provider 级的 `effort` / `t
 | Provider/模型              | Base URL                                   | 推理控制                                      | `/effort` 档位                | 备注 |
 |----------------------------|--------------------------------------------|-----------------------------------------------|-------------------------------|-------|
 | Kimi CN/Global `kimi-k3`   | `api.moonshot.cn/v1`、`api.moonshot.ai/v1` | `reasoning_effort`                            | `low`、`high`、`max`          | 始终思考；默认 `max`。Reasonix 会回放完整的 assistant 消息、使用 `max_completion_tokens`，并省略 K3 固定的采样字段。 |
+| 自定义 Kimi K3 网关        | 任意 OpenAI-compatible K3 端点             | `reasoning_effort`                            | `low`、`high`、`max`          | 设置 `reasoning_protocol = "kimi-k3"`，显式启用 K3 的完整消息回放与请求形态。 |
 | OpenCode Go `kimi-k3`      | `opencode.ai/zen/go/v1`                    | `reasoning_effort`                            | `high`、`max`                 | 中转站专属档位；默认 `max`，并保留中转站标准的 OpenAI-compatible 请求形态。 |
 | Token Rhythm DeepSeek V4   | `tokenrhythm.studio/v1`                    | DeepSeek `thinking.type` + `reasoning_effort` | 模型专属的 DeepSeek 档位      | 通过预设的模型覆盖选择，与网关主机无关。 |
 | Token Rhythm GLM 5/5.1/5.2 | `tokenrhythm.studio/v1`                    | GLM `thinking.type`（`enabled`\|`disabled`）  | `auto`、`enabled`、`disabled` | 通过预设的模型覆盖选择；`reasoning_effort` 会被省略。 |
@@ -37,21 +38,53 @@ Reasonix 只暴露一个 `/effort` 开关（以及 provider 级的 `effort` / `t
 GLM 思考开启时，Reasonix 会按 GLM 交错与保留思考的要求，在后续历史中原样保留
 并返回原始 `reasoning_content`。
 
+如果自定义网关提供 Kimi K3，可在 provider 编辑器的高级设置中将推理协议选择为
+**Kimi K3 推理**，或直接配置：
+
+```toml
+[[providers]]
+name               = "my-kimi-gateway"
+kind               = "openai"
+base_url           = "https://my-gateway.example.com/v1"
+model              = "kimi-k3"
+api_key_env        = "MY_KIMI_API_KEY"
+reasoning_protocol = "kimi-k3"
+```
+
+当网关域名无法被安全自动识别时，需要这个显式协议。它会在后续 assistant 历史中
+保留 `reasoning_content`、使用 `max_completion_tokens`，并省略 K3 固定的采样字段。
+不要把它加到精选的 OpenCode Go 预设中：该中转站有自己的 `high`/`max` 档位，
+并且有意保持标准 OpenAI-compatible 请求形态。
+启用该协议后，Reasonix 固定展示 K3 的 `auto`/`low`/`high`/`max` 档位，协议默认值
+为 `max`；已有的 `supported_efforts` 配置仍会保留，但不会覆盖 K3 协议档位。
+
 ## DeepSeek Anthropic-compatible 端点
 
-可选的 `deepseek-anthropic` 预设指向 `https://api.deepseek.com/anthropic`。
-Reasonix 默认仍使用官方 Chat Completions provider，但它为兼容性测试和面向
-Anthropic 的客户端提供了一条原生 Messages API 路径。Reasonix 会发送
-`thinking.type=enabled|disabled` 与 `output_config.effort`，回放历史工具调用轮次
-中未签名的 DeepSeek 思考块，省略不支持的图片，并依赖 DeepSeek 的自动前缀缓存，
+默认官方 DeepSeek provider 指向 `https://api.deepseek.com/anthropic`。
+新建的官方条目使用原生 Messages API 路径并开启 provider 侧 `web_search`；已有显式
+provider（包括旧的 `deepseek-anthropic` 条目）保留其原协议。Reasonix 会发送
+`thinking.type=enabled|disabled` 与 `output_config.effort`，在请求携带 tools 时回放历史
+assistant 轮次中未签名的 DeepSeek 思考块，省略不支持的图片，并依赖 DeepSeek 的自动前缀缓存，
 而不是被忽略的 `cache_control` 标记。
 
-该预设暴露当前模型专属的 effort 档位：Flash 支持 `auto`、`disabled`、`low`、
-`high` 和 `max`，而 Pro 暴露 `auto`、`disabled`、`high` 和 `max`，因为其当前的
-`low` 输入会映射到 `high`。Anthropic-compatible 端点在线上接受 `low|high|max`。
-遗留的 `medium` 归一化为 `high`；遗留的 `xhigh` 对 Flash 归一化为 `high`、对
-Pro 归一化为 `max`。Claude Opus 别名使用 Pro 映射，而 Sonnet/Haiku 以及不支持
-的模型名遵循 DeepSeek 文档记载的 Flash 回退。
+该预设为 Flash 和 Pro 暴露相同的模型专属 effort 档位：`auto`、`disabled`、
+`low`、`high` 和 `max`。Anthropic-compatible 端点在线上接受 `low|high|max`；
+遗留的 `medium`、`xhigh` 均归一化为 `high`。
+
+OpenAI-compatible 的 DeepSeek 路径采用相同的全轮回放规则：请求携带 tools 时，历史中
+每个保存了 `reasoning_content` 的 assistant 轮次都会原样序列化回请求，不论该轮是否
+调用过工具；不带 tools 时该字段会被 DeepSeek 忽略。如果旧会话仍因提供方特有的
+reasoning 回传 HTTP 400 失败，Reasonix 只重建旧历史的 provider-visible 消息投影并
+重试一次；后续新增轮次继续走正常 reasoning/tool replay，而 canonical session history
+不会被修改。
+
+## 缺失 reasoning 时的恢复
+
+如果 provider 要求工具轮次回放 reasoning，但模型返回了没有 reasoning 的完整工具
+调用，Reasonix 会在执行工具前，对同一份 frozen request 做一次精确重试。它不会在
+整个会话中关闭 thinking，也不会运行长期 provider fallback 熔断器。如果重试后仍然
+无法产生可回放的 reasoning，provider-specific 恢复策略会返回明确的协议错误；如果
+问题来自旧会话中已经持久化的历史，现有的一次性 reasoning 400 自愈仍然有效。
 
 ## 其他所有后端（标准 `reasoning_effort`）
 

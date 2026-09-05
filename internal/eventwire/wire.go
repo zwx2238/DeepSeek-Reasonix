@@ -4,6 +4,7 @@ package eventwire
 import (
 	"encoding/json"
 
+	"reasonix/internal/billing"
 	"reasonix/internal/event"
 	"reasonix/internal/provider"
 )
@@ -12,28 +13,109 @@ import (
 // externalizable:"true" marks large string payloads the Remote protocol may
 // offload via content refs without changing provider-visible semantics.
 type Event struct {
-	Kind            string            `json:"kind"`
-	Text            string            `json:"text,omitempty" externalizable:"true"`
-	Detail          string            `json:"detail,omitempty" externalizable:"true"`
-	Code            string            `json:"code,omitempty"`
-	Reasoning       string            `json:"reasoning,omitempty" externalizable:"true"`
-	MemoryCitations []MemoryCitation  `json:"memoryCitations,omitempty"`
-	Level           string            `json:"level,omitempty"`
-	Tool            *Tool             `json:"tool,omitempty"`
-	Usage           *Usage            `json:"usage,omitempty"`
-	Approval        *Approval         `json:"approval,omitempty"`
-	Ask             *Ask              `json:"ask,omitempty"`
-	Compaction      *Compaction       `json:"compaction,omitempty"`
-	Guardian        *Guardian         `json:"guardian,omitempty"`
-	DecisionReceipt *DecisionReceipt  `json:"decisionReceipt,omitempty"`
-	Extension       *ExtensionSurface `json:"extension,omitempty"`
-	Err             string            `json:"err,omitempty" externalizable:"true"`
-	Outcome         string            `json:"outcome,omitempty"`
-	Readiness       *FinalReadiness   `json:"readiness,omitempty"`
-	RetryAttempt    int               `json:"retryAttempt,omitempty"`
-	RetryMax        int               `json:"retryMax,omitempty"`
-	RetryScope      string            `json:"retryScope,omitempty"` // "headers" | "stream"; omit for older clients
-	StreamAttempt   *StreamAttempt    `json:"streamAttempt,omitempty"`
+	Kind            string              `json:"kind"`
+	TurnID          string              `json:"turnId,omitempty"`
+	Sequence        uint64              `json:"seq,omitempty"`
+	Status          string              `json:"status,omitempty"`
+	Text            string              `json:"text,omitempty" externalizable:"true"`
+	Detail          string              `json:"detail,omitempty" externalizable:"true"`
+	Code            string              `json:"code,omitempty"`
+	Reasoning       string              `json:"reasoning,omitempty" externalizable:"true"`
+	MemoryCitations []MemoryCitation    `json:"memoryCitations,omitempty"`
+	Level           string              `json:"level,omitempty"`
+	Tool            *Tool               `json:"tool,omitempty"`
+	Usage           *Usage              `json:"usage,omitempty"`
+	Approval        *Approval           `json:"approval,omitempty"`
+	Ask             *Ask                `json:"ask,omitempty"`
+	MCPInteraction  *MCPInteraction     `json:"mcpInteraction,omitempty"`
+	Compaction      *Compaction         `json:"compaction,omitempty"`
+	Maintenance     *ContextMaintenance `json:"maintenance,omitempty"`
+	Guardian        *Guardian           `json:"guardian,omitempty"`
+	DecisionReceipt *DecisionReceipt    `json:"decisionReceipt,omitempty"`
+	Extension       *ExtensionSurface   `json:"extension,omitempty"`
+	Err             string              `json:"err,omitempty" externalizable:"true"`
+	Outcome         string              `json:"outcome,omitempty"`
+	Readiness       *FinalReadiness     `json:"readiness,omitempty"`
+	Receipt         *CompletionReceipt  `json:"receipt,omitempty"`
+	CheckpointTurn  *int                `json:"checkpointTurn,omitempty"`
+	RetryAttempt    int                 `json:"retryAttempt,omitempty"`
+	RetryMax        int                 `json:"retryMax,omitempty"`
+	RetryScope      string              `json:"retryScope,omitempty"` // "headers" | "stream" | "protocol"; omit for older clients
+	StreamAttempt   *StreamAttempt      `json:"streamAttempt,omitempty"`
+	// ItemID correlates Steer / TurnDone / unapplied-steer with a durable
+	// session-inbox entry. Empty for legacy text-only guidance.
+	ItemID string `json:"itemId,omitempty"`
+	// SessionPath routes frames emitted by detached Serve controllers. Older
+	// clients ignore the omitted/unknown field and keep single-session behavior.
+	SessionPath string `json:"sessionPath,omitempty"`
+	// SessionCurrent is set by Serve at publication time for frames belonging
+	// to its foreground controller. It lets all-session clients adopt an
+	// externally selected/recovered foreground without polling on every token.
+	SessionCurrent bool `json:"sessionCurrent,omitempty"`
+	// SessionReset distinguishes a fresh /new or /clear target from a resumed
+	// durable session when a different client rotates the foreground.
+	SessionReset bool              `json:"sessionReset,omitempty"`
+	Workspace    *WorkspaceChanged `json:"workspace,omitempty"`
+	// Phase is set on turn_phase events: working | checking | verifying | reviewing.
+	Phase string `json:"phase,omitempty"`
+	// Completion is set on completion_summary events (content-free quality summary).
+	Completion *CompletionSummary `json:"completion,omitempty"`
+}
+
+// CompletionSummary is the JSON form of event.CompletionSummaryInfo.
+type CompletionSummary struct {
+	Preset             string   `json:"preset"` // deprecated; pinned compat value
+	Verdict            string   `json:"verdict"`
+	Mutations          int      `json:"mutations"`
+	ChecksPassed       int      `json:"checks_passed"`
+	ChecksFailed       int      `json:"checks_failed"`
+	ChecksSuppressed   int      `json:"checks_suppressed"`
+	Review             string   `json:"review"`
+	GapKinds           []string `json:"gap_kinds,omitempty"`
+	ConstraintDegraded bool     `json:"constraint_degraded"`
+	Floor              string   `json:"floor,omitempty"`
+	Attention          bool     `json:"attention"`
+}
+
+func toWireCompletionSummary(c *event.CompletionSummaryInfo) *CompletionSummary {
+	if c == nil {
+		return nil
+	}
+	return &CompletionSummary{
+		Preset:             c.Preset,
+		Verdict:            c.Verdict,
+		Mutations:          c.Mutations,
+		ChecksPassed:       c.ChecksPassed,
+		ChecksFailed:       c.ChecksFailed,
+		ChecksSuppressed:   c.ChecksSuppressed,
+		Review:             c.Review,
+		GapKinds:           append([]string(nil), c.GapKinds...),
+		ConstraintDegraded: c.ConstraintDegraded,
+		Floor:              c.Floor,
+		Attention:          c.Attention,
+	}
+}
+
+type WorkspaceChanged struct {
+	Revisions  WorkspaceRevision     `json:"revisions"`
+	Changes    []WorkspacePathChange `json:"changes"`
+	AllPaths   bool                  `json:"allPaths"`
+	Source     string                `json:"source"`
+	WatchState string                `json:"watchState"`
+}
+
+type WorkspaceRevision struct {
+	Content     uint64 `json:"content"`
+	Tree        uint64 `json:"tree"`
+	WorkingTree uint64 `json:"workingTree"`
+	GitMeta     uint64 `json:"gitMeta"`
+	Session     uint64 `json:"session"`
+}
+
+type WorkspacePathChange struct {
+	Path    string `json:"path"`
+	OldPath string `json:"oldPath,omitempty"`
+	Op      string `json:"op"`
 }
 
 // StreamAttempt is the JSON form of event.StreamAttemptInfo.
@@ -47,31 +129,26 @@ type StreamAttempt struct {
 
 // ToWire converts a typed runtime event into the shared frontend JSON contract.
 func ToWire(e event.Event) Event {
-	w := Event{Kind: kindNames[e.Kind], Text: e.Text, Detail: e.Detail, Reasoning: e.Reasoning}
+	w := Event{Kind: kindNames[e.Kind], TurnID: e.TurnID, Sequence: e.Sequence, Status: string(e.Status), Text: e.Text, Detail: e.Detail, Reasoning: e.Reasoning, ItemID: e.ItemID, SessionPath: e.SessionPath, SessionReset: e.SessionReset}
 	if len(e.MemoryCitations) > 0 {
 		w.MemoryCitations = ToWireMemoryCitations(e.MemoryCitations)
 	}
 	switch e.Kind {
 	case event.Notice:
-		w.Code = e.Code
-		if e.DecisionReceipt != nil {
-			w.DecisionReceipt = ToWireDecisionReceipt(e.DecisionReceipt)
-		}
-		if e.Level == event.LevelWarn {
-			w.Level = "warn"
-		} else {
-			w.Level = "info"
-		}
-	case event.ToolDispatch, event.ToolResult, event.ToolProgress:
+		w.applyNotice(e)
+	case event.ToolDispatch, event.ToolResult, event.ToolProgress, event.ToolResultPreview:
 		wt := &Tool{
 			ID: e.Tool.ID, Name: e.Tool.Name, Args: e.Tool.Args,
 			ResolvedName: e.Tool.ResolvedName, CapabilityID: e.Tool.CapabilityID,
 			Output: e.Tool.Output, Err: e.Tool.Err,
 			ReadOnly: e.Tool.ReadOnly, Truncated: e.Tool.Truncated,
 			DurationMs: e.Tool.DurationMs, Partial: e.Tool.Partial,
+			StartedAt: e.Tool.StartedAt, EndedAt: e.Tool.EndedAt,
 			ArgChars: e.Tool.ArgChars, Refreshed: e.Tool.Refreshed,
 			ParentID: e.Tool.ParentID, AttemptID: e.Tool.AttemptID,
 			Diff: e.Tool.Diff, Added: e.Tool.Added, Removed: e.Tool.Removed,
+			SubagentRef: e.Tool.SubagentRef, SubagentStatus: e.Tool.SubagentStatus,
+			SubagentErrorCode: e.Tool.SubagentErrorCode, SubagentRetryable: e.Tool.SubagentRetryable,
 		}
 		if e.Tool.Profile != nil {
 			wt.Profile = &Profile{Model: e.Tool.Profile.Model, Effort: e.Tool.Profile.Effort}
@@ -80,60 +157,42 @@ func ToWire(e event.Event) Event {
 			wt.Execution = toWireShellExecution(e.Tool.Execution)
 		}
 		w.Tool = wt
+	case event.WorkspaceChanged:
+		ws := e.Workspace
+		if ws == nil {
+			ws = &event.WorkspaceChangedPayload{}
+		}
+		changes := make([]WorkspacePathChange, 0, len(ws.Changes))
+		for _, c := range ws.Changes {
+			changes = append(changes, WorkspacePathChange{Path: c.Path, OldPath: c.OldPath, Op: c.Op})
+		}
+		w.Workspace = &WorkspaceChanged{
+			Revisions: WorkspaceRevision{Content: ws.Revisions.Content, Tree: ws.Revisions.Tree, WorkingTree: ws.Revisions.WorkingTree, GitMeta: ws.Revisions.GitMeta, Session: ws.Revisions.Session},
+			Changes:   changes, AllPaths: ws.AllPaths, Source: ws.Source, WatchState: string(ws.WatchState),
+		}
 	case event.Usage:
-		if u := e.Usage; u != nil {
-			w.Usage = &Usage{
-				PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens,
-				TotalTokens: u.TotalTokens, CacheHitTokens: u.CacheHitTokens,
-				CacheMissTokens: u.CacheMissTokens, ReasoningTokens: u.ReasoningTokens,
-				Estimated:               u.Estimated,
-				Source:                  e.UsageSource,
-				ContextPromptTokens:     u.ContextPromptTokens,
-				ContextCompletionTokens: u.ContextCompletionTokens,
-				ContextReasoningTokens:  u.ContextReasoningTokens,
-				ContextCacheHitTokens:   u.ContextCacheHitTokens,
-				ContextCacheMissTokens:  u.ContextCacheMissTokens,
-				SessionCacheHitTokens:   e.SessionHit, SessionCacheMissTokens: e.SessionMiss,
-			}
-			if e.CacheDiagnostics != nil {
-				w.Usage.CacheDiagnostics = ToWireCacheDiagnostics(e.CacheDiagnostics)
-			}
-			if e.Pricing != nil {
-				cost := e.Pricing.Cost(u)
-				w.Usage.Cost = cost
-				w.Usage.Currency = e.Pricing.Symbol()
-				w.Usage.CostUSD = cost
-			}
-		}
+		w.Usage = toWireUsage(e)
 	case event.ApprovalRequest:
-		w.Approval = &Approval{
-			ID: e.Approval.ID, Tool: e.Approval.Tool, Subject: e.Approval.Subject,
-			Reason: e.Approval.Reason, Fresh: e.Approval.Fresh, Kind: e.Approval.Kind,
-		}
-		if e.Approval.Recovery != nil {
-			r := e.Approval.Recovery
-			w.Approval.Recovery = &RecoveryApproval{
-				SourceAgent:     r.SourceAgent,
-				FailedTool:      r.FailedTool,
-				FailedSummary:   r.FailedSummary,
-				Diagnosis:       r.Diagnosis,
-				NextTool:        r.NextTool,
-				NextAction:      r.NextAction,
-				ChangeKind:      r.ChangeKind,
-				ChangeRationale: r.ChangeRationale,
-				ReviewRationale: r.ReviewRationale,
-				PlanBefore:      r.PlanBefore,
-				PlanAfter:       r.PlanAfter,
-				CanGrantTask:    r.CanGrantTask,
-				TaskGrantScope:  r.TaskGrantScope,
-			}
-		}
+		w.Approval = toWireApproval(e.Approval)
 	case event.AskRequest:
 		w.Ask = ToWireAsk(e.Ask)
+	case event.MCPInteractionRequest:
+		w.MCPInteraction = ToWireMCPInteraction(e.MCPInteraction)
 	case event.CompactionStarted, event.CompactionDone:
 		w.Compaction = &Compaction{
 			Trigger: e.Compaction.Trigger, Messages: e.Compaction.Messages,
 			Summary: e.Compaction.Summary, Archive: e.Compaction.Archive,
+		}
+	case event.ContextMaintenanceEvent:
+		if m := e.Maintenance; m != nil {
+			w.Maintenance = &ContextMaintenance{
+				Status: m.Status, Action: m.Action, Trigger: m.Trigger,
+				OperationID: m.OperationID, InputTokens: m.InputTokens,
+				ResultTokens: m.ResultTokens, SavedTokens: m.SavedTokens,
+				AffectedToolResults: m.AffectedToolResults,
+				ProjectionVersion:   m.ProjectionVersion, CacheBreak: m.CacheBreak,
+				Reason: m.Reason,
+			}
 		}
 	case event.GuardianAssessment:
 		w.Guardian = ToWireGuardian(e.Guardian)
@@ -141,6 +200,8 @@ func ToWire(e event.Event) Event {
 		w.Extension = ToWireExtensionSurface(e.Extension)
 	case event.TurnDone:
 		w.Outcome = e.Outcome
+		w.CheckpointTurn = e.CheckpointTurn
+		w.Receipt = completionReceiptWire(e.Receipt)
 		if e.Readiness != nil {
 			w.Readiness = &FinalReadiness{Attempts: e.Readiness.Attempts, Missing: append([]string(nil), e.Readiness.Missing...)}
 		}
@@ -161,8 +222,57 @@ func ToWire(e event.Event) Event {
 			Max:     e.StreamAttempt.Max,
 			Reason:  e.StreamAttempt.Reason,
 		}
+	case event.TurnPhase:
+		w.Phase = string(e.PhaseName)
+		if w.Phase == "" {
+			w.Phase = e.Text
+		}
+	case event.CompletionSummary:
+		w.Completion = toWireCompletionSummary(e.Completion)
 	}
 	return w
+}
+
+func toWireUsage(e event.Event) *Usage {
+	u := e.Usage
+	if u == nil {
+		return nil
+	}
+	wire := &Usage{
+		PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens,
+		TotalTokens: u.TotalTokens, CacheHitTokens: u.CacheHitTokens,
+		CacheMissTokens: u.CacheMissTokens, ReasoningTokens: u.ReasoningTokens,
+		Estimated:               u.Estimated,
+		Source:                  e.UsageSource,
+		ContextPromptTokens:     u.ContextPromptTokens,
+		ContextCompletionTokens: u.ContextCompletionTokens,
+		ContextReasoningTokens:  u.ContextReasoningTokens,
+		ContextCacheHitTokens:   u.ContextCacheHitTokens,
+		ContextCacheMissTokens:  u.ContextCacheMissTokens,
+		SessionCacheHitTokens:   e.SessionHit, SessionCacheMissTokens: e.SessionMiss,
+	}
+	if e.CacheDiagnostics != nil {
+		wire.CacheDiagnostics = ToWireCacheDiagnostics(e.CacheDiagnostics)
+	}
+	quote := e.CostQuote
+	if quote == nil && e.Pricing != nil {
+		quote = event.EnsureCostQuote(e, nil)
+	}
+	if quote != nil {
+		wire.CostQuote = quote
+		wire.CostComplete = quote.CostComplete
+		wire.DisplayComplete = quote.DisplayComplete
+		wire.DisplayStatus = quote.DisplayStatus
+		wire.AggregateMode = quote.AggregateMode
+		wire.OriginalTotals = append([]billing.Money(nil), quote.OriginalTotals...)
+		if quote.Selected != nil {
+			wire.Cost = quote.Selected.Float64()
+			wire.Currency = quote.LegacyCurrencySymbol()
+			wire.CostUSD = wire.Cost
+			wire.CurrencyCode = quote.LegacyCurrencyCode()
+		}
+	}
+	return wire
 }
 
 // DecisionReceipt is the JSON form of a provider-excluded user decision.
@@ -244,6 +354,41 @@ type Ask struct {
 	Questions []AskQuestion `json:"questions"`
 }
 
+// MCPInteraction is the JSON form of an event.MCPInteraction: one
+// server-initiated elicitation awaiting the user's accept/decline/cancel.
+// Schema and URL come from the MCP server; form answers travel only in the
+// resolve call, never on this event.
+type MCPInteraction struct {
+	ID              string          `json:"id"`
+	Server          string          `json:"server"`
+	Mode            string          `json:"mode"`
+	Message         string          `json:"message" externalizable:"true"`
+	RequestedSchema json.RawMessage `json:"requestedSchema,omitempty"`
+	URL             string          `json:"url,omitempty"`
+	ElicitationID   string          `json:"elicitationId,omitempty"`
+}
+
+// applyNotice fills the Notice-specific wire fields.
+func (w *Event) applyNotice(e event.Event) {
+	w.Code = e.Code
+	if e.DecisionReceipt != nil {
+		w.DecisionReceipt = ToWireDecisionReceipt(e.DecisionReceipt)
+	}
+	if e.Level == event.LevelWarn {
+		w.Level = "warn"
+	} else {
+		w.Level = "info"
+	}
+}
+
+// ToWireMCPInteraction converts event.MCPInteraction to its wire form.
+func ToWireMCPInteraction(i event.MCPInteraction) *MCPInteraction {
+	return &MCPInteraction{
+		ID: i.ID, Server: i.Server, Mode: i.Mode, Message: i.Message,
+		RequestedSchema: i.RequestedSchema, URL: i.URL, ElicitationID: i.ElicitationID,
+	}
+}
+
 // Profile carries the subagent model/effort resolved for a tool call.
 type Profile struct {
 	Model  string `json:"model,omitempty"`
@@ -252,26 +397,32 @@ type Profile struct {
 
 // Tool is the JSON form of an event.Tool.
 type Tool struct {
-	ID           string          `json:"id,omitempty"`
-	Name         string          `json:"name"`
-	Args         string          `json:"args,omitempty" externalizable:"true"`
-	ResolvedName string          `json:"resolvedName,omitempty"`
-	CapabilityID string          `json:"capabilityId,omitempty"`
-	Output       string          `json:"output,omitempty" externalizable:"true"`
-	Err          string          `json:"err,omitempty" externalizable:"true"`
-	ReadOnly     bool            `json:"readOnly"`
-	Truncated    bool            `json:"truncated,omitempty"`
-	DurationMs   int64           `json:"durationMs,omitempty"`
-	Partial      bool            `json:"partial,omitempty"`
-	ArgChars     int             `json:"argChars,omitempty"`
-	Refreshed    bool            `json:"refreshed,omitempty"`
-	ParentID     string          `json:"parentId,omitempty"`
-	AttemptID    string          `json:"attemptId,omitempty"` // host-local stream_attempt id for speculative partials
-	Diff         string          `json:"diff,omitempty" externalizable:"true"`
-	Added        int             `json:"added,omitempty"`
-	Removed      int             `json:"removed,omitempty"`
-	Profile      *Profile        `json:"profile,omitempty"`
-	Execution    *ShellExecution `json:"execution,omitempty"`
+	ID                string          `json:"id,omitempty"`
+	Name              string          `json:"name"`
+	Args              string          `json:"args,omitempty" externalizable:"true"`
+	ResolvedName      string          `json:"resolvedName,omitempty"`
+	CapabilityID      string          `json:"capabilityId,omitempty"`
+	Output            string          `json:"output,omitempty" externalizable:"true"`
+	Err               string          `json:"err,omitempty" externalizable:"true"`
+	ReadOnly          bool            `json:"readOnly"`
+	Truncated         bool            `json:"truncated,omitempty"`
+	DurationMs        int64           `json:"durationMs,omitempty"`
+	StartedAt         int64           `json:"startedAt,omitempty"` // unix ms; zero when the call never ran
+	EndedAt           int64           `json:"endedAt,omitempty"`
+	Partial           bool            `json:"partial,omitempty"`
+	ArgChars          int             `json:"argChars,omitempty"`
+	Refreshed         bool            `json:"refreshed,omitempty"`
+	ParentID          string          `json:"parentId,omitempty"`
+	AttemptID         string          `json:"attemptId,omitempty"` // host-local stream_attempt id for speculative partials
+	SubagentRef       string          `json:"subagentRef,omitempty"`
+	SubagentStatus    string          `json:"subagentStatus,omitempty"`
+	SubagentErrorCode string          `json:"subagentErrorCode,omitempty"`
+	SubagentRetryable bool            `json:"subagentRetryable,omitempty"`
+	Diff              string          `json:"diff,omitempty" externalizable:"true"`
+	Added             int             `json:"added,omitempty"`
+	Removed           int             `json:"removed,omitempty"`
+	Profile           *Profile        `json:"profile,omitempty"`
+	Execution         *ShellExecution `json:"execution,omitempty"`
 }
 
 // ShellExecution is the JSON form of event.ShellExecution (local UI metadata).
@@ -331,49 +482,33 @@ type Usage struct {
 	ContextCacheMissTokens  int     `json:"contextCacheMissTokens,omitempty"`
 	Cost                    float64 `json:"cost,omitempty"`
 	Currency                string  `json:"currency,omitempty"`
-	// CostUSD is a compatibility alias for older consumers; it mirrors Cost.
+	// CurrencyCode is the ISO code for Cost (preferred over symbol Currency).
+	CurrencyCode string `json:"currencyCode,omitempty"`
+	// CostUSD is a compatibility alias for older consumers; it mirrors Cost
+	// (selected display valuation) and does not imply USD.
 	CostUSD float64 `json:"costUsd,omitempty"`
+	// CostQuote is the structured host-side quote. New consumers must prefer it
+	// over cost/currency aliases. Never sent to model providers.
+	CostQuote       *billing.CostQuote `json:"costQuote,omitempty"`
+	CostComplete    bool               `json:"costComplete,omitempty"`
+	DisplayComplete bool               `json:"displayComplete,omitempty"`
+	DisplayStatus   string             `json:"displayStatus,omitempty"`
+	AggregateMode   string             `json:"aggregateMode,omitempty"`
+	OriginalTotals  []billing.Money    `json:"originalTotals,omitempty"`
 }
 
 // CacheDiagnostics is the JSON form of cache prefix diagnostics.
 type CacheDiagnostics struct {
-	PrefixHash          string   `json:"prefixHash"`
-	PrefixChanged       bool     `json:"prefixChanged"`
-	PrefixChangeReasons []string `json:"prefixChangeReasons,omitempty"`
-	SystemHash          string   `json:"systemHash"`
-	ToolsHash           string   `json:"toolsHash"`
-	LogRewriteVersion   int      `json:"logRewriteVersion"`
-	ToolSchemaTokens    int      `json:"toolSchemaTokens"`
-	CacheMissTokens     int      `json:"cacheMissTokens"`
-	CacheHitTokens      int      `json:"cacheHitTokens"`
-}
-
-// Approval is the JSON form of an event.Approval.
-type Approval struct {
-	ID       string            `json:"id"`
-	Tool     string            `json:"tool"`
-	Subject  string            `json:"subject" externalizable:"true"`
-	Reason   string            `json:"reason,omitempty" externalizable:"true"`
-	Fresh    bool              `json:"fresh,omitempty"`
-	Kind     string            `json:"kind,omitempty"` // tool | plan | recovery
-	Recovery *RecoveryApproval `json:"recovery,omitempty"`
-}
-
-// RecoveryApproval is the JSON form of an event.RecoveryApproval.
-type RecoveryApproval struct {
-	SourceAgent     string `json:"source_agent,omitempty"`
-	FailedTool      string `json:"failed_tool,omitempty"`
-	FailedSummary   string `json:"failed_summary,omitempty"`
-	Diagnosis       string `json:"diagnosis,omitempty"`
-	NextTool        string `json:"next_tool,omitempty"`
-	NextAction      string `json:"next_action,omitempty"`
-	ChangeKind      string `json:"change_kind,omitempty"`
-	ChangeRationale string `json:"change_rationale,omitempty"`
-	ReviewRationale string `json:"review_rationale,omitempty"`
-	PlanBefore      string `json:"plan_before,omitempty"`
-	PlanAfter       string `json:"plan_after,omitempty"`
-	CanGrantTask    bool   `json:"can_grant_task,omitempty"`
-	TaskGrantScope  string `json:"task_grant_scope,omitempty"`
+	PrefixHash          string                     `json:"prefixHash"`
+	PrefixChanged       bool                       `json:"prefixChanged"`
+	PrefixChangeReasons []string                   `json:"prefixChangeReasons,omitempty"`
+	SystemHash          string                     `json:"systemHash"`
+	ToolsHash           string                     `json:"toolsHash"`
+	LogRewriteVersion   int                        `json:"logRewriteVersion"`
+	ToolSchemaTokens    int                        `json:"toolSchemaTokens"`
+	CacheMissTokens     int                        `json:"cacheMissTokens"`
+	CacheHitTokens      int                        `json:"cacheHitTokens"`
+	SessionContext      *SessionContextDiagnostics `json:"sessionContext,omitempty"`
 }
 
 // Guardian is the JSON form of an event.GuardianResult.
@@ -409,10 +544,14 @@ func ToWireGuardian(g event.GuardianResult) *Guardian {
 			Estimated: u.Estimated,
 		}
 		if g.Pricing != nil {
-			cost := g.Pricing.Cost(u)
-			out.Usage.Cost = cost
-			out.Usage.Currency = g.Pricing.Symbol()
-			out.Usage.CostUSD = cost
+			q := event.EnsureCostQuote(event.Event{Kind: event.Usage, Usage: u, Pricing: g.Pricing}, nil)
+			if q != nil {
+				out.Usage.CostQuote = q
+				out.Usage.Cost = q.LegacyCostFloat()
+				out.Usage.Currency = q.LegacyCurrencySymbol()
+				out.Usage.CostUSD = out.Usage.Cost
+				out.Usage.CurrencyCode = q.LegacyCurrencyCode()
+			}
 		}
 	}
 	return out
@@ -433,7 +572,7 @@ func ToWireAsk(a event.Ask) *Ask {
 
 // ToWireCacheDiagnostics converts cache diagnostics into their JSON wire form.
 func ToWireCacheDiagnostics(d *event.CacheDiagnostics) *CacheDiagnostics {
-	return &CacheDiagnostics{
+	out := &CacheDiagnostics{
 		PrefixHash:          d.PrefixHash,
 		PrefixChanged:       d.PrefixChanged,
 		PrefixChangeReasons: append([]string(nil), d.PrefixChangeReasons...),
@@ -444,6 +583,18 @@ func ToWireCacheDiagnostics(d *event.CacheDiagnostics) *CacheDiagnostics {
 		CacheMissTokens:     d.CacheMissTokens,
 		CacheHitTokens:      d.CacheHitTokens,
 	}
+	if sc := d.SessionContext; sc != nil {
+		section := func(in event.SessionContextSectionDiagnostics) SessionContextSectionDiagnostics {
+			return SessionContextSectionDiagnostics{Digest: in.Digest, Chars: in.Chars}
+		}
+		out.SessionContext = &SessionContextDiagnostics{
+			Version: sc.Version, Digest: sc.Digest, TargetRole: sc.TargetRole,
+			Reasons:     append([]string(nil), sc.Reasons...),
+			Environment: section(sc.Environment), Workspace: section(sc.Workspace),
+			BackgroundMemory: section(sc.BackgroundMemory), SkillsCatalog: section(sc.SkillsCatalog),
+		}
+	}
+	return out
 }
 
 // KindNames returns every stable frontend event kind in event.Kind order. It is
@@ -451,7 +602,7 @@ func ToWireCacheDiagnostics(d *event.CacheDiagnostics) *CacheDiagnostics {
 // generator; callers receive a copy and may sort it without mutating eventwire.
 func KindNames() []string {
 	names := make([]string, 0, int(event.KindCount))
-	for kind := event.Kind(0); kind < event.KindCount; kind++ {
+	for kind := range event.KindCount {
 		if name, ok := kindNames[kind]; ok {
 			names = append(names, name)
 		}
@@ -467,28 +618,52 @@ func KindName(kind event.Kind) (string, bool) {
 }
 
 var kindNames = map[event.Kind]string{
-	event.TurnStarted:        "turn_started",
-	event.Reasoning:          "reasoning",
-	event.Text:               "text",
-	event.Message:            "message",
-	event.ToolDispatch:       "tool_dispatch",
-	event.ToolResult:         "tool_result",
-	event.Usage:              "usage",
-	event.Notice:             "notice",
-	event.Phase:              "phase",
-	event.ApprovalRequest:    "approval_request",
-	event.AskRequest:         "ask_request",
-	event.TurnDone:           "turn_done",
-	event.CompactionStarted:  "compaction_started",
-	event.CompactionDone:     "compaction_done",
-	event.ToolProgress:       "tool_progress",
-	event.MCPSurfaceReady:    "mcp_surface_ready",
-	event.Retrying:           "retrying",
-	event.Steer:              "steer",
-	event.GuardianAssessment: "guardian_assessment",
-	event.ExtensionSurface:   "extension_surface",
-	event.ExtensionStatus:    "extension_status",
-	event.StreamAttempt:      "stream_attempt",
+	event.TurnStarted:             "turn_started",
+	event.Reasoning:               "reasoning",
+	event.Text:                    "text",
+	event.Message:                 "message",
+	event.ToolDispatch:            "tool_dispatch",
+	event.ToolResult:              "tool_result",
+	event.Usage:                   "usage",
+	event.Notice:                  "notice",
+	event.Phase:                   "phase",
+	event.ApprovalRequest:         "approval_request",
+	event.AskRequest:              "ask_request",
+	event.TurnDone:                "turn_done",
+	event.CompactionStarted:       "compaction_started",
+	event.CompactionDone:          "compaction_done",
+	event.ToolProgress:            "tool_progress",
+	event.MCPSurfaceReady:         "mcp_surface_ready",
+	event.Retrying:                "retrying",
+	event.Steer:                   "steer",
+	event.GuardianAssessment:      "guardian_assessment",
+	event.ExtensionSurface:        "extension_surface",
+	event.ExtensionStatus:         "extension_status",
+	event.StreamAttempt:           "stream_attempt",
+	event.ContextMaintenanceEvent: "context_maintenance",
+	event.WorkspaceChanged:        "workspace_changed",
+	event.TurnPhase:               "turn_phase",
+	event.CompletionSummary:       "completion_summary",
+	event.ToolResultPreview:       "tool_result_preview",
+	event.TurnStatusChanged:       "turn_status",
+	event.MCPInteractionRequest:   "mcp_interaction",
+	event.PromptAnswered:          "prompt_answered",
+	event.SessionChanged:          "session_changed",
+}
+
+// ContextMaintenance is the JSON form of event.ContextMaintenance.
+type ContextMaintenance struct {
+	Status              string `json:"status,omitempty"`
+	Action              string `json:"action,omitempty"`
+	Trigger             string `json:"trigger,omitempty"`
+	OperationID         string `json:"operationId,omitempty"`
+	InputTokens         int    `json:"inputTokens,omitempty"`
+	ResultTokens        int    `json:"resultTokens,omitempty"`
+	SavedTokens         int    `json:"savedTokens,omitempty"`
+	AffectedToolResults int    `json:"affectedToolResults,omitempty"`
+	ProjectionVersion   uint64 `json:"projectionVersion,omitempty"`
+	CacheBreak          bool   `json:"cacheBreak,omitempty"`
+	Reason              string `json:"reason,omitempty"`
 }
 
 // ExtensionSurface is the JSON form of an event.ExtensionSurfacePayload.

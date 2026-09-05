@@ -274,11 +274,23 @@ eq(replayed.promptArrivedId, "plan-1", "same-id replay keeps the anchor id");
   eq(activated.promptArrivedAt, undefined, "activation drops the prompt arrival time");
 }
 
+// A tab-tagged ask may arrive while its session is in the background. When
+// the tab metadata also reports pendingPrompt, activation must not erase the
+// only actionable copy while a scoped backend replay is still in flight.
+{
+  const backgroundAsk = reducer({ ...initialState }, { type: "event", e: askEvent });
+  const activated = reducer(backgroundAsk, { type: "backend_activation_start", backendPendingPrompt: true });
+  eq(activated.ask?.id, "ask-1", "confirmed background ask survives activation start");
+  eq(activated.pendingPrompt, true, "confirmed background ask keeps the prompt gate");
+  eq(activated.running, true, "confirmed background ask keeps the turn running");
+  eq(activated.promptArrivedId, "ask-1", "confirmed background ask keeps its freshness anchor");
+}
+
 // A new user turn drops the anchor so the next turn's prompts re-anchor fresh.
 {
   const armed = reducer({ ...initialState }, { type: "event", e: planApprovalEvent });
   const answeredEarly = reducer(armed, { type: "clearApproval" });
-  const nextTurn = reducer(answeredEarly, { type: "user", text: "continue", seq: 0 });
+  const nextTurn = reducer(answeredEarly, { type: "user", text: "continue", seq: 0, submissionId: "pending-prompt-next-turn" });
   eq(nextTurn.promptArrivedId, undefined, "a new user message drops the prompt anchor id");
   eq(nextTurn.promptArrivedAt, undefined, "a new user message drops the prompt arrival time");
 }
@@ -410,6 +422,7 @@ window.runtime = {
 window.go = {
   main: {
     App: {
+      RegisterNavigationIntent: async () => {},
       ListTabs: async () => {
         if (holdNextListTabs) {
           const gatePromise = holdNextListTabs;

@@ -20,15 +20,33 @@ const connector = "  ⎿  "
 // connectorBlock renders lines under the connector: the first carries the "⎿"
 // gutter, the rest align beneath it. Returns "" for no lines.
 func connectorBlock(lines []string) string {
+	return renderConnectorBlock(lines, false)
+}
+
+// connectorBlockCopy mirrors connectorBlock and marks only its generated
+// prefixes as omitted copy spans. The caller stores this rendition beside the
+// visible fixed block; it never reaches the terminal.
+func connectorBlockCopy(lines []string) string {
+	return renderConnectorBlock(lines, true)
+}
+
+func renderConnectorBlock(lines []string, copyMode bool) string {
 	if len(lines) == 0 {
 		return ""
 	}
 	indent := strings.Repeat(" ", len([]rune(connector)))
-	out := dim(connector) + lines[0]
-	for _, ln := range lines[1:] {
-		out += "\n" + indent + ln
+	firstPrefix := dim(connector)
+	nextPrefix := indent
+	if copyMode {
+		firstPrefix = copyOmitSpan(firstPrefix)
+		nextPrefix = copyOmitSpan(nextPrefix)
 	}
-	return out
+	var out strings.Builder
+	out.WriteString(firstPrefix + lines[0])
+	for _, ln := range lines[1:] {
+		out.WriteString("\n" + nextPrefix + ln)
+	}
+	return out.String()
 }
 
 // toolVerb maps a tool's snake_case id to the verb shown in its card.

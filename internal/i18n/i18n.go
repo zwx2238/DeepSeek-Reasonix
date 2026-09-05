@@ -32,13 +32,59 @@ type Messages struct {
 	InitHint string
 
 	// chat REPL
-	ChatTip             string // tip line under the chat banner
-	TurnCancelled       string // shown when Ctrl-C aborts the in-flight turn but the chat keeps running
-	InterruptedRecovery string // replay notice for a durable interrupted turn
-	RecoveryPaused      string // controlled Auto retry pause; user can continue in the next message
-	NoSessionToResume   string // shown when --continue / --resume finds nothing
-	ResumeRequiresTTY   string // shown when --resume runs piped instead of on a terminal
-	PickSessionLabel    string // header on the --resume picker
+	ChatTip                string // tip line under the chat banner
+	TurnCancelled          string // shown when Ctrl-C aborts the in-flight turn but the chat keeps running
+	InterruptedRecovery    string // replay notice for a durable interrupted turn
+	FinalReadinessRecovery string // replay hint for a durable final-readiness pause
+	ReadinessContinuing    string // host is automatically finishing known readiness gaps
+	RecoveryPaused         string // controlled Auto retry pause; user can continue in the next message
+	CompletionUncertain    string // completion validator could not confirm the result; work is kept
+	ReasoningReplayRepair  string // provider rejected replayed thinking blocks; history repaired and retried once
+	// Host guard/recovery notices (event.Notice texts the fronts render verbatim).
+	EmptyFinal                       string // empty_final: no visible answer; retrying
+	ExecutorHandoff                  string // executor_handoff: answered without using tools
+	ToolBudget                       string // tool_budget: tool-call round limit reached
+	TaskBudget                       string // tool_budget variant: task spend budget reached
+	LoopGuard                        string // loop_guard: no-progress tool loop
+	ProgressGuard                    string // progress_guard: repeated work without new evidence
+	SoftBudgetConverge               string // loop_guard: converging a long read-only investigation
+	EvidenceNudge                    string // evidence_nudge: unverified mutations
+	ReasoningGovernor                string // reasoning_governor engaged
+	UnappliedSteerFmt                string // unapplied_steer — %s = the dropped guidance
+	DeprecatedContextRetention       string // agent.keep / agent.recent_keep deprecation warning
+	FinishReasonLength               string
+	FinishReasonContentFilter        string
+	FinishReasonRepetition           string
+	StreamInterruptedIdleTimeout     string
+	StreamInterruptedPrematureEOF    string
+	StreamInterruptedConnectionReset string
+	ToolOutputTruncatedFmt           string // %d = elided bytes, %d = original bytes
+	IncompleteReadFinishBlocked      string
+	ReadContinuationRequired         string
+	IncompleteReadDetected           string
+	ReadStrategyRequired             string
+	ReadStrategyProgress             string
+	ReadStrategyResolved             string
+	ReadLocalSafetyPaged             string
+	ReadCompleted                    string
+	ReadRestrictedStrategyFmt        string // %d = estimated tokens, %d = token budget
+	ContextRecoveryAdjustBudget      string
+	ContextRecoveryCompacted         string
+	PlannerFallback                  string
+	PlannerSafetyFallback            string
+	PlannerPlanAwaitingApproval      string
+	PlannerPlanNotApproved           string
+	PlannerPlanOnly                  string
+	CapabilityProxyFmt               string // %s = display name, %s = resolved target
+	ReceiptVerified                  string // end-of-turn receipt, nothing unproven
+	ReceiptGapsHeader                string // end-of-turn receipt, header above the unproven list
+	ReceiptRisksHeader               string // end-of-turn receipt, header above declared risks
+	ReceiptMore                      string // end-of-turn receipt, "and N more" tail
+	// ReceiptGapKinds maps a completion gap kind to its short human phrase.
+	ReceiptGapKinds   map[string]string
+	NoSessionToResume string // shown when --continue / --resume finds nothing
+	ResumeRequiresTTY string // shown when --resume runs piped instead of on a terminal
+	PickSessionLabel  string // header on the --resume picker
 
 	// in-chat /resume command
 	ResumeBusy          string // shown when /resume is used mid-turn
@@ -57,6 +103,12 @@ type Messages struct {
 	ChatThinking                           string // live reasoning marker label, e.g. "thinking…"
 	ChatThoughtForFmt                      string // collapsed reasoning summary, "%d" = elapsed s
 	ChatStatusThinkingFmt                  string // "%s thinking… (%ds · <cancel hint>)" — %s = spinner, %d = elapsed s
+	TurnPhaseWorking                       string // host turn_phase label: working
+	TurnPhaseChecking                      string // host turn_phase label: checking
+	TurnPhaseVerifying                     string // host turn_phase label: verifying
+	TurnPhaseReviewing                     string // host turn_phase label: reviewing
+	CompletionSummaryBlocked               string // concise non-verbose alert for a blocked turn
+	CompletionSummaryNeedsAttention        string // concise non-verbose alert for verification/review gaps
 	ChatToolWorkingFmt                     string // "%s working · %ds" under a running tool — %s = spinner, %d = elapsed s
 	ChatSubagentPhaseQueued                string // sub-agent progress phase label ("queued")
 	ChatSubagentPhaseRunning               string // ("running")
@@ -77,14 +129,18 @@ type Messages struct {
 	ChatStatusCycleHint                    string // plan-toggle shortcut hint shown when no modal prompt owns the status row
 	ChatStatusCycleHintCompact             string // readable shortcut hint used by the persistent footer
 	ChatTurnReceiptLabel                   string // compact per-turn usage receipt attached to the completed assistant response
+	RateBandPeak                           string
+	RateBandOffPeak                        string
+	RateBandMixed                          string
 	ChatStatusModelLabel                   string
 	ChatStatusEffortLabel                  string
-	ChatStatusWorkLabel                    string
+	ChatStatusPresetLabel                  string
 	ChatStatusCacheLabel                   string
 	ChatStatusContextLabel                 string
 	ChatStatusCompactLabel                 string
 	ChatStatusJobsLabel                    string
 	ChatStatusBalanceLabel                 string
+	ChatStatusCostLabel                    string
 	ChatStatusCacheNowFmt                  string // cache status tag, "%s" = latest-turn hit rate with percent sign
 	ChatStatusCacheAvgFmt                  string // cache status tag, "%s" = session-average hit rate with percent sign
 	ChatStatusPlanApproval                 string // shortcuts hint while a plan is pending
@@ -135,6 +191,10 @@ type Messages struct {
 	ConfigWriteReason                      string // reason shown for managed config write approval
 	ConfigWriteDeclined                    string // model-facing denial when the user declines a managed config write
 	ConfigWriteApprovalChoices             string // approval choice list for managed config write prompts
+	WriteAccessApprovalChoices             string // four-choice list for extending writable roots
+	WriteAccessHomeWarning                 string // high-risk warning when granting the whole home directory
+	WriteAccessMergedPermissionHint        string // note that the same choice also grants ordinary tool permission
+	WriteAccessProjectHint                 string // note that project persist edits reasonix.toml
 	PermissionSavedFmt                     string // permission rule saved notice: path, rule
 	PermissionAlreadyAllowedFmt            string // permission rule already covered notice: path, rule
 	PermissionSaveFailedFmt                string // permission rule save failure notice: rule, error
@@ -154,6 +214,11 @@ type Messages struct {
 	AskSubmitTitle     string // submit-tab title in the ask tool question card
 	AskUnanswered      string // placeholder for an unanswered ask question
 	AskSubmitHint      string // submit-tab keyboard hint
+	ElicitURLHint      string // url-mode elicitation keyboard hint
+	ElicitConfirmOnly  string // schema-less form elicitation hint
+	ElicitUnanswered   string // placeholder for an unanswered elicitation field
+	ElicitSubmit       string // elicitation submit row label
+	ElicitSubmitHint   string // elicitation keyboard hint
 
 	// output style listing (/output-style).
 	OutputStyleNone           string // no styles available
@@ -203,6 +268,7 @@ type Messages struct {
 	ClipboardTextPasteRemoteHint string // mouse paste cannot read the user's local clipboard/PRIMARY selection over SSH
 	ClipboardTextPasteFailedFmt  string // text clipboard read failed, one %v
 	ClipboardImagePastingHint    string // shown while an image is being read from the system clipboard
+	ClipboardPasteEmptyNotice    string
 	ClipboardImagePasteFailedFmt string // image clipboard read failed, one %v
 	MouseCaptureOnHint           string // "/mouse" turned in-app mouse handling back on
 	MouseCaptureOffHint          string // "/mouse" released mouse capture to the terminal
@@ -220,6 +286,8 @@ type Messages struct {
 	CmdClear            string // /clear
 	CmdCls              string // /cls
 	CmdCompact          string // /compact
+	CmdContinueChecks   string // /continue-checks
+	CmdContext          string // /context
 	CmdRewind           string // /rewind
 	CmdTree             string // /tree
 	CmdBranch           string // /branch
@@ -254,6 +322,7 @@ type Messages struct {
 	CmdMouse            string // /mouse
 	CmdReasonLang       string // /reasoning-language
 	CmdHelp             string // /help
+	CmdWeb              string // /web
 	CmdTodo             string // /todo
 	CmdQuit             string // /quit (also accepts /exit as hidden alias)
 	CmdCopy             string // /copy
@@ -277,6 +346,8 @@ type Messages struct {
 	ArgEffortHigh       string // /effort high
 	ArgEffortXHigh      string // /effort xhigh
 	ArgEffortMax        string // /effort max
+	ArgPresetStandard   string // /preset standard
+	ArgPresetDelivery   string // /preset delivery
 	ArgThemeCurrent     string // /theme <style> active tag
 	ArgLanguageAuto     string // /language auto
 	ArgLanguageEn       string // /language en
@@ -311,8 +382,7 @@ type Messages struct {
 	GoalPaused                   string
 	GoalPausedReason             string
 	GoalPausedFmt                string // %s = stop cause
-	GoalBudgetExtended           string
-	GoalRuntimeFmt               string // turns used/limit, tokens used, no-progress, extensions
+	GoalRuntimeFmt               string // turns, requests, tokens, work duration
 	GoalRuntimeLastReason        string
 	ModelSwitchUnavailable       string
 	ModelSwitchBusy              string
@@ -324,37 +394,28 @@ type Messages struct {
 	RuntimeReloadQueued          string // /reload queued behind active work; the idle drain runs it
 	RuntimeReloaded              string // /reload completed (no generation available)
 	RuntimeReloadedGenerationFmt string // /reload completed; %d is the runtime build generation
-	WorkModeStatusFmt            string
-	WorkModeListHeaderFmt        string
-	WorkModeListHint             string
-	WorkModeEconomyLabel         string
-	WorkModeBalancedLabel        string
-	WorkModeDeliveryLabel        string
-	WorkModeEconomyDesc          string
-	WorkModeBalancedDesc         string
-	WorkModeDeliveryDesc         string
 	WorkModeUsage                string
-	WorkModeSwitchUnavailable    string
-	WorkModeSwitchBusy           string
-	WorkModeAlreadyOnFmt         string
-	WorkModeSwitchingFmt         string
-	WorkModeSwitchedFmt          string
-	RewindNone                   string
-	RewindCodeConversation       string
-	RewindConversationOnly       string
-	RewindCodeOnly               string
-	RewindFork                   string
-	RewindSummarizeFrom          string
-	RewindSummarizeUpto          string
-	RewindPickTitle              string
-	RewindPickHint               string
-	RewindRestoreTitleFmt        string
-	RewindApplyHint              string
-	RewindCoverageTitle          string
-	RewindCoverageWarningFmt     string
-	RewindConfirmHint            string
-	RewindUnavailableFmt         string
-	RewindEmpty                  string
+	// WorkModeDeprecatedNotice is shown once when a legacy /work-mode or
+	// /profile command is used. Prefer /preset.
+	WorkModeDeprecatedNotice string
+	// QualityFloorApplied confirms a quality floor switch.
+	QualityFloorApplied      string
+	RewindNone               string
+	RewindCodeConversation   string
+	RewindConversationOnly   string
+	RewindCodeOnly           string
+	RewindFork               string
+	RewindSummarizeFrom      string
+	RewindSummarizeUpto      string
+	RewindPickTitle          string
+	RewindPickHint           string
+	RewindRestoreTitleFmt    string
+	RewindApplyHint          string
+	RewindCoverageTitle      string
+	RewindCoverageWarningFmt string
+	RewindConfirmHint        string
+	RewindUnavailableFmt     string
+	RewindEmpty              string
 
 	// skill picker overlay (/skills interactive panel in CLI TUI)
 	SkillPickerAvailableFmt      string
@@ -465,6 +526,7 @@ type Messages struct {
 	CustomPromptBaseURL  string // "Enter Base URL"
 	CustomPromptKeyEnv   string // "Enter API Key env var name"
 	CustomPromptAPIKey   string // "Enter API Key"
+	CustomPromptWindow   string // "Enter context window in tokens"
 	CustomAddedFmt       string // "Added custom model: %s"
 
 	// Anthropic compatible provider
@@ -505,8 +567,11 @@ type Messages struct {
 
 	// provider HTTP error explanations — actionable, reason + fix per status code
 	ProviderErrBadRequest          string // 400
+	ProviderErrContextOverflowFmt  string // 400/413/422 shared-window overflow with numbers
 	ProviderErrAuth                string // 401 — no key configured / sent
 	ProviderErrAuthRejected        string // 401 — a key was sent but the server rejected it
+	ProviderErrModelFormatMismatch string // provider rejected the model on the selected wire format
+	ProviderErrOpenCodeGoGrokRoute string // recovery hint for OpenCode Go Grok routing
 	ProviderErrInsufficientBalance string // 402
 	ProviderErrUnprocessable       string // 422
 	ProviderErrInputSensitive      string // MiniMax 1026

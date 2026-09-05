@@ -5,12 +5,12 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,6 +21,7 @@ import (
 
 	"reasonix/desktop/internal/winuninstall"
 	"reasonix/internal/installlayout"
+	"reasonix/internal/proc"
 	"reasonix/internal/repair"
 )
 
@@ -499,7 +500,7 @@ func newLogger() *log.Logger {
 func waitForProcessExit(pid uint32, timeout time.Duration) error {
 	h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, pid)
 	if err != nil {
-		if err == windows.ERROR_INVALID_PARAMETER {
+		if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
 			return nil
 		}
 		return err
@@ -521,7 +522,7 @@ func waitForProcessExit(pid uint32, timeout time.Duration) error {
 }
 
 func runInstaller(installer, installDir string) error {
-	cmd := exec.Command(installer)
+	cmd := proc.VisibleCommand(installer)
 	// Keep the helper itself hidden, but let the NSIS update-progress window be
 	// visible. /REASONIXSTAGE makes the signed installer extract only; the helper
 	// performs every live replacement through the claimed transaction.
@@ -533,7 +534,7 @@ func cleanupOwnedWindowsUpdateDirectory(path string, owner os.FileInfo) error {
 	if path == "" || owner == nil || !owner.IsDir() {
 		return fmt.Errorf("Windows update cleanup identity is incomplete")
 	}
-	for attempt := 0; attempt < 16; attempt++ {
+	for attempt := range 16 {
 		cleanup := fmt.Sprintf("%s.reasonix-cleanup-%d-%d", path, time.Now().UTC().UnixNano(), attempt)
 		from, err := windows.UTF16PtrFromString(path)
 		if err != nil {
@@ -573,7 +574,7 @@ func cleanupOwnedWindowsUpdateDirectory(path string, owner os.FileInfo) error {
 }
 
 func startRelaunch(relaunch, installDir string) error {
-	cmd := exec.Command(relaunch)
+	cmd := proc.VisibleCommand(relaunch)
 	cmd.Dir = installDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	return cmd.Start()

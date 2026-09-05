@@ -10,7 +10,8 @@ import { createRoot } from "react-dom/client";
 import type { AppBindings } from "../lib/bridge";
 import { activateGoalAndSubmitOnTab } from "../lib/goalSubmit";
 import { useController } from "../lib/useController";
-import type { BalanceInfo, CheckpointMeta, ContextInfo, EffortInfo, HistoryMessage, JobView, Meta, TabMeta } from "../lib/types";
+import { historySliceFromMessages } from "./mockHistorySlice";
+import type { BalanceInfo, CheckpointMeta, ContextInfo, EffortInfo, HistoryMessage, HistorySliceRequest, JobView, Meta, TabMeta } from "../lib/types";
 
 let passed = 0;
 let failed = 0;
@@ -119,6 +120,7 @@ window.runtime = {
 window.go = {
   main: {
     App: {
+      RegisterNavigationIntent: async () => {},
       ListTabs: async () => tabs.map((tab) => ({ ...tab })),
       SetActiveTab: async (tabId: string) => {
         tabs = tabs.map((tab) => ({ ...tab, active: tab.id === tabId }));
@@ -133,6 +135,8 @@ window.go = {
       JobsForTab: async () => jobs,
       CheckpointsForTab: async () => checkpoints,
       HistoryForTab: async (): Promise<HistoryMessage[]> => [],
+      HistorySliceForTab: async (tabId: string, request: HistorySliceRequest) =>
+        historySliceFromMessages(tabId, [], request),
       HistoryPageForTab: async () => ({ messages: [], startTurn: 0, endTurn: 0, totalTurns: 0, hasOlder: false }),
       HistoryCheckpointTurnsForTab: async () => [],
       ReplayPendingPrompts: async () => {},
@@ -143,7 +147,7 @@ window.go = {
             : tab,
         );
       },
-      SubmitInitialGoalToTab: async (
+      SubmitInitialGoalToTabWithID: async (
         tabID: string,
         goal: string,
         display: string,
@@ -151,6 +155,7 @@ window.go = {
         invocations: { name: string }[],
         collaborationMode: string,
         toolApprovalMode: string,
+        _submissionID: string,
       ): Promise<string[]> => {
         await goalGate;
         initialGoalCalls.push(
@@ -166,8 +171,14 @@ window.go = {
       SubmitInvocationsToTab: async () => {
         throw new Error("split SubmitInvocationsToTab must not be used for initial Goals");
       },
+      SubmitInvocationsToTabWithID: async () => {
+        throw new Error("split SubmitInvocationsToTabWithID must not be used for initial Goals");
+      },
       SubmitToTab: async () => {
         throw new Error("plain SubmitToTab must not be used for structured first Goal turns");
+      },
+      SubmitToTabWithID: async () => {
+        throw new Error("plain SubmitToTabWithID must not be used for structured first Goal turns");
       },
     } as Partial<AppBindings> as AppBindings,
   },
@@ -194,23 +205,27 @@ await waitForActive("tab-a");
 eq(controller?.activeTabId, "tab-a", "harness starts on tab A");
 
 const sourceTabId = "tab-a";
-const pending = activateGoalAndSubmitOnTab({
-  tabId: sourceTabId,
-  displayText: "Cross-tab safe goal",
-  submitText: "/ui-ux-pro-max Cross-tab safe goal",
-  structured: {
-    display: "/ui-ux-pro-max Cross-tab safe goal",
-    input: "Cross-tab safe goal",
-    invocations: [{ name: "ui-ux-pro-max", kind: "skill", offset: 0 }],
-  },
-  sendToTab: (tabId, goal, display, submit, structured) => {
-    if (!controller) throw new Error("controller missing");
-    return controller.sendToTab(tabId, display, submit, undefined, structured, {
-      goal,
-      collaborationMode: "normal",
-      toolApprovalMode: "ask",
-    });
-  },
+let pending!: Promise<void>;
+await act(async () => {
+  pending = activateGoalAndSubmitOnTab({
+    tabId: sourceTabId,
+    displayText: "Cross-tab safe goal",
+    submitText: "/ui-ux-pro-max Cross-tab safe goal",
+    structured: {
+      display: "/ui-ux-pro-max Cross-tab safe goal",
+      input: "Cross-tab safe goal",
+      invocations: [{ name: "ui-ux-pro-max", kind: "skill", offset: 0 }],
+    },
+    sendToTab: (tabId, goal, display, submit, structured) => {
+      if (!controller) throw new Error("controller missing");
+      return controller.sendToTab(tabId, display, submit, undefined, structured, {
+        goal,
+        collaborationMode: "normal",
+        toolApprovalMode: "ask",
+      });
+    },
+  });
+  await flushPromises();
 });
 
 // While the atomic bridge call for A is suspended, the UI switches to tab B.
@@ -238,7 +253,7 @@ eq(initialGoalCalls.length, 1, "atomic Goal submit ran once");
 // structured submit.
 const failedInitialGoalCalls: string[] = [];
 const failInvokeCalls: string[] = [];
-(window.go.main.App as AppBindings).SubmitInitialGoalToTab = async (tabID: string) => {
+(window.go.main.App as AppBindings).SubmitInitialGoalToTabWithID = async (tabID: string) => {
   failedInitialGoalCalls.push(tabID);
   throw new Error("workbench target changed");
 };

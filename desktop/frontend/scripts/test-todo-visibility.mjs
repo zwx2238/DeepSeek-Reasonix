@@ -19,14 +19,17 @@ const moduleUrl = `data:text/javascript;base64,${Buffer.from(transpiled).toStrin
 const {
   dismissedTodoKeyForScope,
   resolveTodoPanelTodos,
+  sameStringList,
   sameTodoList,
   scopedTodoBatchKey,
   scopedTodoDismissalKey,
   shouldOpenTodoPanelByDefault,
   shouldShowTodoPanel,
   todoBatchKey,
+  todoContinueTarget,
   todoDismissalKey,
   todoPanelScope,
+  todoPresentationStatus,
 } = await import(moduleUrl);
 
 const completedTodos = [
@@ -37,6 +40,15 @@ const activeTodos = [
   { content: "Inspect the report", status: "in_progress" },
   { content: "Ship the fix", status: "pending" },
 ];
+
+assert.equal(todoPresentationStatus("in_progress", { running: true, pendingPrompt: false }), "in_progress", "an active turn renders its current todo as in progress");
+assert.equal(todoPresentationStatus("in_progress", { running: false, pendingPrompt: false }), "paused", "an idle or restored turn renders a stale current todo as ready to continue");
+assert.equal(todoPresentationStatus("in_progress", { running: true, pendingPrompt: true }), "waiting", "a prompt-blocked turn renders its current todo as waiting for the user");
+assert.equal(todoPresentationStatus("completed", { running: false, pendingPrompt: false }), "completed", "completed todos remain completed");
+assert.equal(todoContinueTarget("tab-a", "tab-a", { ready: true, running: false, pendingPrompt: false }), "tab-a", "continue targets the exact idle visible tab");
+assert.equal(todoContinueTarget("tab-a", "tab-b", { ready: true, running: false, pendingPrompt: false }), null, "a rapid tab switch prevents stale todo routing");
+assert.equal(todoContinueTarget("tab-a", "tab-a", { ready: true, running: true, pendingPrompt: false }), null, "running turns cannot receive a duplicate continue submission");
+assert.equal(todoContinueTarget("tab-a", "tab-a", { ready: true, running: false, pendingPrompt: true }), null, "pending prompts must be answered instead of bypassed by continue");
 
 assert.deepEqual(
   resolveTodoPanelTodos([], undefined),
@@ -75,7 +87,7 @@ assert.equal(
 assert.equal(
   shouldShowTodoPanel("todo-final", null, completedTodos),
   true,
-  "a completed todo list stays visible in collapsed form until the user dismisses it",
+  "a completed batch remains mounted so TodoPanel can distinguish restore from a live transition",
 );
 assert.equal(
   shouldShowTodoPanel("todo-active", null, [{ content: "Run tests", status: "in_progress" }]),
@@ -161,6 +173,19 @@ assert.equal(
   true,
   "an incomplete restored todo list must reappear even after a stale local dismissal",
 );
+assert.equal(
+  shouldShowTodoPanel(activeKey, null, activeTodos, { batchKey: todoBatchKey(activeTodos), batches: [todoBatchKey(activeTodos)] }),
+  true,
+  "a persisted completed-batch dismissal cannot hide unfinished work",
+);
+const completedBatch = todoBatchKey(completedTodos);
+assert.equal(
+  shouldShowTodoPanel(completedKey, null, completedTodos, { batchKey: completedBatch, batches: [completedBatch] }),
+  false,
+  "a session-sidecar batch dismissal hides the completed shelf after upgrade remount",
+);
+assert.equal(sameStringList(["a"], ["a"]), true, "identical dismissed batch lists compare equal");
+assert.equal(sameStringList(["a"], ["b"]), false, "changed dismissed batch lists compare unequal");
 assert.notEqual(
   activeKey,
   todoDismissalKey([{ ...activeTodos[0], status: "completed" }, { ...activeTodos[1], status: "in_progress" }]),

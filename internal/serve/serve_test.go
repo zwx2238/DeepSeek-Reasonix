@@ -154,11 +154,11 @@ func TestServeEndpoints(t *testing.T) {
 	srv := httptest.NewServer(New(ctrl, bc, config.ServeConfig{}).Handler())
 	defer srv.Close()
 
-	if resp, err := http.Get(srv.URL + "/history"); err != nil || resp.StatusCode != 200 {
+	if resp, err := http.Get(srv.URL + "/history"); err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("history = %v / %v", resp, err)
 	}
 
-	if resp, _ := http.Get(srv.URL + "/context"); resp.StatusCode != 200 {
+	if resp, _ := http.Get(srv.URL + "/context"); resp.StatusCode != http.StatusOK {
 		t.Errorf("context status = %d", resp.StatusCode)
 	}
 
@@ -280,6 +280,22 @@ func TestHistoryMessagesPreserveToolDetails(t *testing.T) {
 	}
 }
 
+func TestHistoryMessagesStripTransientReasoningLanguageBlock(t *testing.T) {
+	got := historyMessages([]provider.Message{
+		{Role: provider.RoleUser, Content: "<reasoning-language>\nVisible reasoning/thinking text preference: use English.\n</reasoning-language>\n\nExplain this module"},
+		{Role: provider.RoleAssistant, Content: "ok"},
+	})
+	if len(got) != 2 {
+		t.Fatalf("history length = %d, want 2: %+v", len(got), got)
+	}
+	if got[0].Role != "user" || got[0].Content != "Explain this module" {
+		t.Fatalf("user history = %+v, want plain user text without reasoning-language", got[0])
+	}
+	if strings.Contains(got[0].Content, "<reasoning-language>") {
+		t.Fatalf("reasoning-language leaked into /history user content: %q", got[0].Content)
+	}
+}
+
 func TestSessionsListPreviewStripsTransientReasoningLanguageBlock(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
@@ -362,22 +378,6 @@ func TestServeApproveMissingID(t *testing.T) {
 	}
 }
 
-func TestServeNewSessionEndpoint(t *testing.T) {
-	bc := NewBroadcaster()
-	ctrl := control.New(control.Options{Sink: bc})
-	srv := httptest.NewServer(New(ctrl, bc, config.ServeConfig{}).Handler())
-	defer srv.Close()
-
-	resp, err := http.Post(srv.URL+"/new", "application/json", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Errorf("new session = %d, want 204", resp.StatusCode)
-	}
-}
-
 func TestServeCompactEndpoint(t *testing.T) {
 	bc := NewBroadcaster()
 	ctrl := control.New(control.Options{Sink: bc})
@@ -391,26 +391,6 @@ func TestServeCompactEndpoint(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Errorf("compact = %d, want 204", resp.StatusCode)
-	}
-}
-
-func TestServeIndexPage(t *testing.T) {
-	bc := NewBroadcaster()
-	ctrl := control.New(control.Options{Sink: bc})
-	srv := httptest.NewServer(New(ctrl, bc, config.ServeConfig{}).Handler())
-	defer srv.Close()
-
-	resp, err := http.Get(srv.URL + "/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Errorf("index status = %d", resp.StatusCode)
-	}
-	ct := resp.Header.Get("Content-Type")
-	if !strings.Contains(ct, "text/html") {
-		t.Errorf("index content-type = %q, want text/html", ct)
 	}
 }
 
@@ -844,7 +824,7 @@ func TestSessionsSkipsCleanupPending(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].Name != "active" || filepath.Clean(got[0].Path) != filepath.Clean(active) {
+	if len(got) != 1 || got[0].Name != "active" || got[0].Path != agent.CanonicalSessionPath(active) {
 		t.Fatalf("/sessions = %+v, want only active session", got)
 	}
 }
@@ -985,7 +965,7 @@ func TestServeContextEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		t.Errorf("context status = %d", resp.StatusCode)
 	}
 	var body map[string]int

@@ -14,11 +14,12 @@ import (
 // provider-side prompt-cache reuse. Comparing snapshots across turns
 // lets us explain *why* a cache miss happened.
 type PrefixShape struct {
-	SystemHash        string
-	ToolsHash         string
-	PrefixHash        string
-	LogRewriteVersion int
-	ToolSchemaTokens  int
+	SystemHash           string
+	ToolsHash            string
+	PrefixHash           string
+	LogRewriteVersion    int
+	ToolSchemaTokens     int
+	SessionContextDigest string
 }
 
 // CacheDiagnostics is a type alias for event.CacheDiagnostics so the agent
@@ -26,7 +27,7 @@ type PrefixShape struct {
 // every call site, while still assigning to event.Event.CacheDiagnostics.
 type CacheDiagnostics = event.CacheDiagnostics
 
-func shortHash(v interface{}) string {
+func shortHash(v any) string {
 	b, _ := json.Marshal(v)
 	h := sha256.Sum256(b)
 	return fmt.Sprintf("%x", h[:8])
@@ -39,7 +40,7 @@ func CaptureShape(systemPrompt string, schemas []provider.ToolSchema, rewriteVer
 	return PrefixShape{
 		SystemHash: shortHash(systemPrompt),
 		ToolsHash:  shortHash(string(toolsJSON)),
-		PrefixHash: shortHash(map[string]interface{}{
+		PrefixHash: shortHash(map[string]any{
 			"system": systemPrompt,
 			"tools":  string(toolsJSON),
 		}),
@@ -78,6 +79,9 @@ func CompareShape(prev, cur PrefixShape, usage *provider.Usage, contentReasons [
 	}
 	if prev.ToolsHash != "" && prev.ToolsHash != cur.ToolsHash {
 		reasons = append(reasons, "tools")
+	}
+	if prev.SessionContextDigest != cur.SessionContextDigest {
+		reasons = append(reasons, "session_context")
 	}
 	reasons = append(reasons, contentReasons...)
 	var miss, hit int

@@ -63,7 +63,7 @@ func (m *chatTUI) rebuildWrappedLinesFull(contentW int) bool {
 	}
 	n := len(m.transcript)
 	m.wrapBlockLines = make([][]string, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		m.wrapBlockLines[i] = wrapBlockLines(m.transcript[i], contentW)
 	}
 	// Prefer per-block flatten over join-then-wrap so streaming suffix rebuilds
@@ -135,15 +135,4 @@ func (m *chatTUI) invalidateWrapFrom(index int) {
 	m.wrapBlockLines = m.wrapBlockLines[:index]
 	m.wrapBlockCount = index
 	m.wrappedLines = flattenBlockWraps(m.wrapBlockLines)
-}
-
-// rewriteTranscriptBlock updates a block's rendered text and invalidates the
-// wrap suffix from that index. Prefer this over bare transcript[i] = … so the
-// streaming hot path never forces a full-history rebuild.
-func (m *chatTUI) rewriteTranscriptBlock(index int, rendered string) {
-	if index < 0 || index >= len(m.transcript) {
-		return
-	}
-	m.transcript[index] = rendered
-	m.invalidateWrapFrom(index)
 }

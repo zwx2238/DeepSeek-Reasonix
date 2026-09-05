@@ -6,14 +6,16 @@ import (
 	"errors"
 	"math"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"reasonix/internal/agent"
+	"reasonix/internal/billing"
 	"reasonix/internal/control"
 	"reasonix/internal/event"
 	"reasonix/internal/provider"
-	"reasonix/internal/secrets"
 )
 
 const (
@@ -70,21 +72,23 @@ type SessionRuntimeStateProvider interface {
 type ReasonixStatusGoal struct {
 	Status    string `json:"status"`
 	Objective string `json:"objective,omitempty"`
-	// Runtime is the optional Goal budget/runtime summary; absent for old
+	// Runtime is the optional Goal usage/runtime summary; absent for old
 	// hosts or when no goal is active.
 	Runtime *ReasonixGoalRuntime `json:"runtime,omitempty"`
 }
 
 type ReasonixGoalRuntime struct {
 	TurnsUsed        int    `json:"turnsUsed"`
-	TurnsLimit       int    `json:"turnsLimit"`
+	TurnsLimit       int    `json:"turnsLimit"` // Deprecated: always 0.
 	TokensUsed       int    `json:"tokensUsed"`
+	RequestsUsed     int    `json:"requestsUsed,omitempty"`
+	WorkDurationMs   int64  `json:"workDurationMs,omitempty"`
 	TokensLimit      int    `json:"tokensLimit"` // Deprecated: always 0; retained for protocol compatibility.
 	NoProgressTurns  int    `json:"noProgressTurns"`
-	NoProgressLimit  int    `json:"noProgressLimit"`
+	NoProgressLimit  int    `json:"noProgressLimit"` // Deprecated: always 0.
 	LastReason       string `json:"lastReason,omitempty"`
 	StopCause        string `json:"stopCause,omitempty"`
-	BudgetExtensions int    `json:"budgetExtensions"`
+	BudgetExtensions int    `json:"budgetExtensions"` // Deprecated: always 0.
 }
 
 type ReasonixTurnOutcome struct {
@@ -96,26 +100,6 @@ type ReasonixFinalReadiness struct {
 	ReadyForReview bool     `json:"readyForReview"`
 	Summary        string   `json:"summary"`
 	Risks          []string `json:"risks"`
-}
-
-type ReasonixUsage struct {
-	PromptTokens            int      `json:"promptTokens"`
-	CompletionTokens        int      `json:"completionTokens"`
-	ReasoningTokens         int      `json:"reasoningTokens"`
-	CacheHitTokens          int      `json:"cacheHitTokens"`
-	CacheMissTokens         int      `json:"cacheMissTokens"`
-	ContextPromptTokens     int      `json:"contextPromptTokens"`
-	ContextCompletionTokens int      `json:"contextCompletionTokens"`
-	Estimated               bool     `json:"estimated,omitempty"`
-	CacheHitRatio           *float64 `json:"cacheHitRatio"`
-	EstimatedCost           *float64 `json:"estimatedCost"`
-	Currency                *string  `json:"currency"`
-	UsageSource             string   `json:"usageSource"`
-}
-
-type ReasonixStatusUsage struct {
-	Turn       ReasonixUsage `json:"turn"`
-	Cumulative ReasonixUsage `json:"cumulative"`
 }
 
 // ReasonixSessionStatus is the stable schemaVersion=1 recovery snapshot.
@@ -147,11 +131,13 @@ type ReasonixStatusUpdate struct {
 }
 
 type usageAccumulator struct {
-	promptTokens            int
-	completionTokens        int
-	reasoningTokens         int
-	cacheHitTokens          int
-	cacheMissTokens         int
+	promptTokens     int
+	completionTokens int
+	reasoningTokens  int
+	cacheHitTokens   int
+	cacheMissTokens  int
+	// Context fields are a latest-request gauge, unlike the cumulative
+	// billable counters above.
 	contextPromptTokens     int
 	contextCompletionTokens int
 	estimated               bool
@@ -160,9 +146,12 @@ type usageAccumulator struct {
 	estimatedCost           float64
 	currency                string
 	source                  string
+	costComplete            bool
+	quoteEvents             int
+	quoteLedger             *billing.Ledger
 }
 
-func (a *usageAccumulator) add(u *provider.Usage, pricing *provider.Pricing, source string) {
+func (a *usageAccumulator) addQuoted(u *provider.Usage, pricing *provider.Pricing, quote *billing.CostQuote, source string) {
 	if u == nil {
 		return
 	}
@@ -190,23 +179,53 @@ func (a *usageAccumulator) add(u *provider.Usage, pricing *provider.Pricing, sou
 	} else if a.source != source {
 		a.source = "mixed"
 	}
-	if pricing != nil {
-		currency := strings.TrimSpace(pricing.Currency)
-		if currency == "" {
-			currency = pricing.Symbol()
-		}
-		if a.pricedEvents == 0 {
-			a.currency = currency
-		} else if a.currency != currency {
-			a.currency = ""
-		}
-		a.estimatedCost += pricing.Cost(u)
+	if quote == nil && pricing != nil {
+		quote = event.EnsureCostQuote(event.Event{Kind: event.Usage, Usage: u, Pricing: pricing, UsageSource: source}, nil)
+	}
+	if quote != nil {
 		a.pricedEvents++
+		a.quoteEvents++
+		a.estimated = true
+		if a.quoteLedger == nil {
+			a.quoteLedger = billing.NewLedger()
+		}
+		a.quoteLedger.Add(*quote, billing.UsageTokens{
+			PromptTokens:           u.PromptTokens,
+			CompletionTokens:       u.CompletionTokens,
+			CacheHitTokens:         u.CacheHitTokens,
+			CacheMissTokens:        u.CacheMissTokens,
+			CacheWriteTokens:       u.CacheWriteTokens,
+			CacheWriteBilledTokens: u.CacheWriteBilledTokens,
+			Estimated:              u.Estimated,
+		}, time.Time{})
+		if quote.Selected != nil {
+			cur := quote.LegacyCurrencyCode()
+			if a.pricedEvents == 1 {
+				a.currency = cur
+				a.costComplete = quote.Complete
+			} else if a.currency != cur {
+				// Different selected currencies — re-aggregate later via quotes.
+				a.currency = cur
+			}
+			if !quote.Complete {
+				a.costComplete = false
+			}
+			a.estimatedCost += quote.Selected.Float64()
+		} else if pricing != nil {
+			// Incomplete display valuation: keep original, mark incomplete.
+			a.costComplete = false
+			a.estimatedCost += quote.Original.Float64()
+			if a.currency == "" {
+				a.currency = billing.NormalizeCurrency(quote.Original.Currency)
+			}
+		}
+		return
 	}
 }
 
 func (a usageAccumulator) wire() ReasonixUsage {
 	usage := ReasonixUsage{
+		TotalTokens:             a.promptTokens + a.completionTokens,
 		PromptTokens:            a.promptTokens,
 		CompletionTokens:        a.completionTokens,
 		ReasoningTokens:         a.reasoningTokens,
@@ -224,11 +243,31 @@ func (a usageAccumulator) wire() ReasonixUsage {
 		ratio := float64(a.cacheHitTokens) / float64(total)
 		usage.CacheHitRatio = &ratio
 	}
+	if a.quoteLedger != nil && a.quoteEvents == a.pricedEvents && len(a.quoteLedger.Entries) > 0 {
+		agg := a.quoteLedger.Total("")
+		usage.CostQuote = &agg
+		costComplete := agg.CostComplete
+		displayComplete := agg.DisplayComplete
+		usage.CostComplete = &costComplete
+		usage.DisplayComplete = &displayComplete
+		usage.DisplayStatus = agg.DisplayStatus
+		usage.AggregateMode = agg.AggregateMode
+		usage.OriginalTotals = append([]billing.Money(nil), agg.OriginalTotals...)
+		if agg.Selected != nil && !math.IsNaN(agg.Selected.Float64()) && !math.IsInf(agg.Selected.Float64(), 0) {
+			cost := agg.Selected.Float64()
+			currency := agg.LegacyCurrencyCode()
+			usage.EstimatedCost = &cost
+			usage.Currency = &currency
+		}
+		return usage
+	}
 	if a.events > 0 && a.pricedEvents == a.events && a.currency != "" && !math.IsNaN(a.estimatedCost) && !math.IsInf(a.estimatedCost, 0) {
 		cost := a.estimatedCost
 		currency := a.currency
 		usage.EstimatedCost = &cost
 		usage.Currency = &currency
+		complete := a.costComplete
+		usage.CostComplete = &complete
 	}
 	return usage
 }
@@ -284,8 +323,8 @@ func (t *statusTelemetry) onEvent(e event.Event) (string, bool) {
 		return "phase", true
 	case event.Usage:
 		t.mutate(func(t *statusTelemetry) {
-			t.turnUsage.add(e.Usage, e.Pricing, e.UsageSource)
-			t.cumulative.add(e.Usage, e.Pricing, e.UsageSource)
+			t.turnUsage.addQuoted(e.Usage, e.Pricing, e.CostQuote, e.UsageSource)
+			t.cumulative.addQuoted(e.Usage, e.Pricing, e.CostQuote, e.UsageSource)
 		})
 		return "usage", true
 	case event.ApprovalRequest:
@@ -333,19 +372,29 @@ func (t *statusTelemetry) finishTurn(runErr error, cancelled bool, goalStatus, s
 		default:
 			var readinessErr *agent.FinalReadinessError
 			var recoveryPause *agent.RecoveryPauseError
+			var completionPause *agent.CompletionUncertainError
+			_, runPause := agent.InspectRunPause(runErr)
 			switch {
 			case errors.As(runErr, &readinessErr):
 				t.phase = "readiness_paused"
-				t.turnOutcome = ReasonixTurnOutcome{Kind: "paused", Reason: clipStatusText(readinessErr.Error(), 2_048)}
+				t.turnOutcome = ReasonixTurnOutcome{Kind: "paused", Reason: clipStatusError(readinessErr, 2_048)}
 				t.finalReadiness.Risks = redactStatusTexts(readinessErr.Missing, 2_048)
 				eventName = "pause"
 			case errors.As(runErr, &recoveryPause):
 				t.phase = "recovery_paused"
 				t.turnOutcome = ReasonixTurnOutcome{Kind: "paused", Reason: clipStatusText(recoveryPause.Error(), 2_048)}
 				eventName = "pause"
+			case errors.As(runErr, &completionPause):
+				t.phase = "completion_uncertain"
+				t.turnOutcome = ReasonixTurnOutcome{Kind: "paused", Reason: clipStatusText(completionPause.Error(), 2_048)}
+				eventName = "pause"
+			case runPause:
+				t.phase = "paused"
+				t.turnOutcome = ReasonixTurnOutcome{Kind: "paused", Reason: clipStatusError(runErr, 2_048)}
+				eventName = "pause"
 			case runErr != nil:
 				t.phase = "error"
-				t.turnOutcome = ReasonixTurnOutcome{Kind: "error", Reason: clipStatusText(runErr.Error(), 2_048)}
+				t.turnOutcome = ReasonixTurnOutcome{Kind: "error", Reason: clipStatusError(runErr, 2_048)}
 				t.goalOverride = "failed"
 				eventName = "error"
 			default:
@@ -383,6 +432,7 @@ type persistedUsageAccumulator struct {
 	EstimatedCost           float64 `json:"estimatedCost"`
 	Currency                string  `json:"currency,omitempty"`
 	Source                  string  `json:"source,omitempty"`
+	CostComplete            *bool   `json:"costComplete,omitempty"`
 }
 
 type persistedStatusTelemetry struct {
@@ -397,6 +447,11 @@ type persistedStatusTelemetry struct {
 }
 
 func persistUsage(a usageAccumulator) persistedUsageAccumulator {
+	var costComplete *bool
+	if a.pricedEvents > 0 {
+		complete := a.costComplete
+		costComplete = &complete
+	}
 	return persistedUsageAccumulator{
 		PromptTokens: a.promptTokens, CompletionTokens: a.completionTokens,
 		ReasoningTokens: a.reasoningTokens, CacheHitTokens: a.cacheHitTokens,
@@ -404,11 +459,15 @@ func persistUsage(a usageAccumulator) persistedUsageAccumulator {
 		ContextPromptTokens: a.contextPromptTokens, ContextCompletionTokens: a.contextCompletionTokens,
 		Estimated: a.estimated, Events: a.events,
 		PricedEvents: a.pricedEvents, EstimatedCost: a.estimatedCost,
-		Currency: a.currency, Source: a.source,
+		Currency: a.currency, Source: a.source, CostComplete: costComplete,
 	}
 }
 
 func restoreUsage(a persistedUsageAccumulator) usageAccumulator {
+	costComplete := a.PricedEvents > 0 && a.Currency != ""
+	if a.CostComplete != nil {
+		costComplete = *a.CostComplete
+	}
 	return usageAccumulator{
 		promptTokens: a.PromptTokens, completionTokens: a.CompletionTokens,
 		reasoningTokens: a.ReasoningTokens, cacheHitTokens: a.CacheHitTokens,
@@ -416,7 +475,7 @@ func restoreUsage(a persistedUsageAccumulator) usageAccumulator {
 		contextPromptTokens: a.ContextPromptTokens, contextCompletionTokens: a.ContextCompletionTokens,
 		estimated: a.Estimated, events: a.Events,
 		pricedEvents: a.PricedEvents, estimatedCost: a.EstimatedCost,
-		currency: a.Currency, source: a.Source,
+		currency: a.Currency, source: a.Source, costComplete: costComplete,
 	}
 }
 
@@ -428,7 +487,7 @@ func (t *statusTelemetry) persisted() *persistedStatusTelemetry {
 	defer t.mu.Unlock()
 	return &persistedStatusTelemetry{
 		Sequence: t.sequence, State: t.state, Phase: t.phase,
-		TurnOutcome: t.turnOutcome,
+		TurnOutcome: redactTurnOutcome(t.turnOutcome),
 		FinalReadiness: ReasonixFinalReadiness{
 			ReadyForReview: t.finalReadiness.ReadyForReview,
 			Summary:        clipStatusText(t.finalReadiness.Summary, 16_384),
@@ -451,7 +510,7 @@ func restoreStatusTelemetry(saved *persistedStatusTelemetry) *statusTelemetry {
 	// waiting on work that no longer exists in this runtime.
 	t.state = "idle"
 	t.phase = normalizePersistedStatusPhase(saved.Phase)
-	t.turnOutcome = saved.TurnOutcome
+	t.turnOutcome = redactTurnOutcome(saved.TurnOutcome)
 	if t.turnOutcome.Kind == "" {
 		t.turnOutcome.Kind = "none"
 	}
@@ -480,7 +539,7 @@ func (t *statusTelemetry) snapshot() statusTelemetrySnapshot {
 		state:    t.state,
 		phase:    t.phase,
 		turnOutcome: ReasonixTurnOutcome{
-			Kind: t.turnOutcome.Kind, Reason: clipStatusText(t.turnOutcome.Reason, 2_048),
+			Kind: t.turnOutcome.Kind, Reason: clipStatusCredentialText(t.turnOutcome.Reason, 2_048),
 		},
 		finalReadiness: ReasonixFinalReadiness{
 			ReadyForReview: t.finalReadiness.ReadyForReview,
@@ -491,6 +550,11 @@ func (t *statusTelemetry) snapshot() statusTelemetrySnapshot {
 		cumulative:   t.cumulative.wire(),
 		goalOverride: t.goalOverride,
 	}
+}
+
+func redactTurnOutcome(outcome ReasonixTurnOutcome) ReasonixTurnOutcome {
+	outcome.Reason = clipStatusCredentialText(outcome.Reason, 2_048)
+	return outcome
 }
 
 func defaultSessionRuntimeState(cwd string) SessionRuntimeState {
@@ -524,14 +588,6 @@ func normalizeGoalStatus(value string) string {
 	default:
 		return "none"
 	}
-}
-
-func clipStatusText(value string, limit int) string {
-	value = strings.TrimSpace(secrets.Redact(value))
-	if len(value) <= limit {
-		return value
-	}
-	return value[:limit]
 }
 
 func redactStatusTexts(values []string, limit int) []string {
@@ -579,9 +635,6 @@ func (s *service) sessionRuntimeState(ctx context.Context, p SessionRuntimeState
 		if err != nil {
 			return SessionRuntimeState{}, err
 		}
-		if strings.EqualFold(strings.TrimSpace(p.RuntimeProfile), "economy") {
-			state.PlannerMode = "off"
-		}
 		if strings.TrimSpace(state.PlannerMode) == "" {
 			state.PlannerMode = "on"
 		}
@@ -590,11 +643,7 @@ func (s *service) sessionRuntimeState(ctx context.Context, p SessionRuntimeState
 		}
 		return state, nil
 	}
-	state := defaultSessionRuntimeState(p.Cwd)
-	if strings.EqualFold(strings.TrimSpace(p.RuntimeProfile), "economy") {
-		state.PlannerMode = "off"
-	}
-	return state, nil
+	return defaultSessionRuntimeState(p.Cwd), nil
 }
 
 func (s *service) bindStatusEvents(sess *acpSession) {
@@ -644,7 +693,6 @@ func (s *acpSession) statusSnapshot() ReasonixSessionStatus {
 	ctrl := s.ctrl
 	model := s.model
 	effort := cloneStringPtr(s.effortOverride)
-	workMode := s.runtimeProfile
 	mode := s.modeID
 	runtimeState := s.runtimeState
 	telemetry := s.status
@@ -666,6 +714,8 @@ func (s *acpSession) statusSnapshot() ReasonixSessionStatus {
 				TurnsUsed:        rt.TurnsUsed,
 				TurnsLimit:       rt.TurnsLimit,
 				TokensUsed:       rt.TokensUsed,
+				RequestsUsed:     rt.RequestsUsed,
+				WorkDurationMs:   rt.WorkDurationMs,
 				TokensLimit:      rt.TokensLimit,
 				NoProgressTurns:  rt.NoProgressTurns,
 				NoProgressLimit:  rt.NoProgressLimit,
@@ -679,12 +729,9 @@ func (s *acpSession) statusSnapshot() ReasonixSessionStatus {
 		goalStatus = t.goalOverride
 	}
 	mode = normalizeACPCollaborationMode(mode)
-	workMode = strings.ToLower(strings.TrimSpace(workMode))
-	switch workMode {
-	case "economy", "delivery":
-	default:
-		workMode = "balanced"
-	}
+	// WorkMode is a deprecated wire-compat field pinned to the historical
+	// default; execution modes no longer exist at runtime.
+	workMode := "balanced"
 	if runtimeState.PlannerMode != "off" {
 		runtimeState.PlannerMode = "on"
 	}
@@ -730,9 +777,9 @@ func finalAssistantSummary(ctrl acpController) string {
 		return ""
 	}
 	history := ctrl.History()
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role == provider.RoleAssistant && strings.TrimSpace(history[i].Content) != "" {
-			return history[i].Content
+	for _, v := range slices.Backward(history) {
+		if v.Role == provider.RoleAssistant && strings.TrimSpace(v.Content) != "" {
+			return v.Content
 		}
 	}
 	return ""

@@ -1,11 +1,26 @@
 package cli
 
 import (
+	"os"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
+
+// mouseCaptureOffByDefault hands the mouse to the terminal over SSH, where
+// native click-drag selection and the right-click menu beat the in-app
+// scrollbar and wheel-scroll, and capture cannot reach the local clipboard
+// anyway. REASONIX_DISABLE_MOUSE=0 forces capture on everywhere; /mouse flips
+// either way for the session.
+func mouseCaptureOffByDefault() bool {
+	v := strings.TrimSpace(os.Getenv("REASONIX_DISABLE_MOUSE"))
+	if v != "" {
+		return v != "0"
+	}
+	return remoteClipboardSession()
+}
 
 // enableMouseTracking is the cell-motion + SGR enable sequence matching what
 // View() requests via tea.MouseModeCellMotion. Windows Terminal / ConPTY can
@@ -52,10 +67,7 @@ func (m *chatTUI) armMouseReenableTimer(now time.Time) tea.Cmd {
 	if m.mouseReenableTimerArmed {
 		return nil
 	}
-	wait := mouseReenableMinInterval - now.Sub(m.lastMouseReenable)
-	if wait < 0 {
-		wait = 0
-	}
+	wait := max(mouseReenableMinInterval-now.Sub(m.lastMouseReenable), 0)
 	m.mouseReenableTimerArmed = true
 	return tea.Tick(wait, func(time.Time) tea.Msg {
 		return mouseReenableMsg{}

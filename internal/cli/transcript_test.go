@@ -44,11 +44,15 @@ func TestReplaySectionsKeepAssistantIdentity(t *testing.T) {
 	configureCLITheme("dark")
 
 	sections := replaySectionsFor([]provider.Message{
+		{Role: provider.RoleUser, Origin: provider.MessageOriginHost, Content: "<pinned_context_revision>private pinned body</pinned_context_revision>"},
 		{Role: provider.RoleUser, Content: "Which version?"},
 		{Role: provider.RoleAssistant, Content: "Version 1.2.3"},
 	}, 48)
 	if len(sections) != 2 {
 		t.Fatalf("replay sections = %d, want user and assistant", len(sections))
+	}
+	if plain := ansi.Strip(strings.Join(sections, "")); strings.Contains(plain, "private pinned body") {
+		t.Fatalf("replay exposed a pinned revision: %q", plain)
 	}
 	if plain := ansi.Strip(sections[1]); !strings.HasPrefix(plain, "  ◆ Reasonix\n\n  Version 1.2.3") {
 		t.Fatalf("replayed assistant answer lost its identity: %q", plain)
@@ -74,6 +78,17 @@ func TestReplaySectionsRestoreInterruptedLocalOutput(t *testing.T) {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("replayed interrupted history missing %q:\n%s", want, plain)
 		}
+	}
+}
+
+func TestReplaySectionsRestoreFinalReadinessRecoveryHint(t *testing.T) {
+	sections := replaySectionsFor([]provider.Message{{
+		Role: provider.RoleTool, ToolCallID: provider.LocalOnlyToolID, Name: provider.LocalOnlyToolName, LocalOnly: true,
+		FinalReadinessRecovery: &provider.FinalReadinessRecovery{Pending: true, Missing: []string{"verification"}},
+	}}, 64)
+	plain := ansi.Strip(strings.Join(sections, ""))
+	if !strings.Contains(plain, "/continue-checks") {
+		t.Fatalf("replayed readiness pause lacks recovery command: %q", plain)
 	}
 }
 
@@ -166,13 +181,13 @@ func TestSelectedTextRestoresMathWithoutReusingRawColumns(t *testing.T) {
 	}
 
 	plain := ansi.Strip(m.wrappedLines[lineIndex])
-	formulaByte := strings.Index(plain, "α")
-	afterByte := strings.Index(plain, "after")
-	if formulaByte < 0 || afterByte < 0 {
+	before, _, ok := strings.Cut(plain, "α")
+	before0, _, ok0 := strings.Cut(plain, "after")
+	if !ok || !ok0 {
 		t.Fatalf("math line = %q", plain)
 	}
-	formulaCol := ansi.StringWidth(plain[:formulaByte])
-	afterCol := ansi.StringWidth(plain[:afterByte])
+	formulaCol := ansi.StringWidth(before)
+	afterCol := ansi.StringWidth(before0)
 
 	m.sel = selection{
 		active: true,
@@ -218,12 +233,12 @@ func TestSelectedTextRestoresMathFromReplayBundle(t *testing.T) {
 	formulaCol := -1
 	for i, line := range m.wrappedLines {
 		plain := ansi.Strip(line)
-		formulaByte := strings.Index(plain, "α")
-		if formulaByte < 0 {
+		before, _, ok := strings.Cut(plain, "α")
+		if !ok {
 			continue
 		}
 		lineIndex = i
-		formulaCol = ansi.StringWidth(plain[:formulaByte])
+		formulaCol = ansi.StringWidth(before)
 		break
 	}
 	if lineIndex < 0 {
@@ -283,12 +298,12 @@ func TestSelectedTextPreservesProseAroundMath(t *testing.T) {
 
 	for i, line := range m.wrappedLines {
 		plain := ansi.Strip(line)
-		startByte := strings.Index(plain, "before")
+		before, _, ok := strings.Cut(plain, "before")
 		endByte := strings.Index(plain, " after")
-		if startByte < 0 || endByte < 0 {
+		if !ok || endByte < 0 {
 			continue
 		}
-		startCol := ansi.StringWidth(plain[:startByte])
+		startCol := ansi.StringWidth(before)
 		endCol := ansi.StringWidth(plain[:endByte+len(" after")])
 		m.sel = selection{
 			active: true,

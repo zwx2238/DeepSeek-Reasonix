@@ -2,6 +2,7 @@ package openai
 
 import (
 	"net/url"
+	"slices"
 	"strings"
 
 	"reasonix/internal/provider"
@@ -24,10 +25,8 @@ func matchesVendorHost(baseURL, apex string, canonical ...string) bool {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
-	for _, c := range canonical {
-		if host == c {
-			return true
-		}
+	if slices.Contains(canonical, host) {
+		return true
 	}
 	return strings.HasSuffix(host, "."+apex)
 }
@@ -36,6 +35,32 @@ func matchesVendorHost(baseURL, apex string, canonical ...string) bool {
 // (api.deepseek.com or any *.deepseek.com subdomain).
 func IsDeepSeek(baseURL string) bool {
 	return matchesVendorHost(baseURL, "deepseek.com", "api.deepseek.com")
+}
+
+// OfficialDeepSeekVisionModel is the only official DeepSeek chat SKU that
+// accepts image input. Flash and Pro remain text-only; a future name that
+// merely contains "vision" must not inherit this contract.
+const OfficialDeepSeekVisionModel = "deepseek-v4-flash-vision-exp"
+
+// IsOfficialDeepSeekVisionModel reports whether model is the pinned official
+// DeepSeek vision SKU. Matching is case-insensitive and trims surrounding space.
+func IsOfficialDeepSeekVisionModel(model string) bool {
+	return strings.EqualFold(strings.TrimSpace(model), OfficialDeepSeekVisionModel)
+}
+
+// DeepSeekImageInputAllowed applies the official endpoint hard limit after a
+// provider has resolved its configured or catalog-derived image capability.
+func DeepSeekImageInputAllowed(officialBase bool, requestURL, model string, metadataProvided, enabled bool) bool {
+	if !officialBase && !IsDeepSeek(requestURL) {
+		return enabled
+	}
+	return (!metadataProvided || enabled) && IsOfficialDeepSeekVisionModel(model)
+}
+
+// OfficialDeepSeekAllowsVision reports whether this official DeepSeek endpoint
+// may serialize image parts for the selected model. Custom gateways never match.
+func OfficialDeepSeekAllowsVision(baseURL, model string) bool {
+	return IsDeepSeek(baseURL) && IsOfficialDeepSeekVisionModel(model)
 }
 
 // IsOpenAI reports whether baseURL points at OpenAI's official API host. Keep

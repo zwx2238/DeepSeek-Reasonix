@@ -12,6 +12,39 @@ export interface TodoPanelScopeInput {
   eventChannel?: string | null;
 }
 
+export type TodoPresentationStatus = "pending" | "in_progress" | "waiting" | "paused" | "completed";
+
+export interface TodoRuntimePresentation {
+  running: boolean;
+  pendingPrompt: boolean;
+}
+
+export function todoPresentationStatus(
+  status: Todo["status"],
+  runtime: TodoRuntimePresentation,
+): TodoPresentationStatus {
+  switch (todoStatus(status)) {
+    case "completed":
+      return "completed";
+    case "in_progress":
+      if (runtime.pendingPrompt) return "waiting";
+      return runtime.running ? "in_progress" : "paused";
+    default:
+      return "pending";
+  }
+}
+
+export function todoContinueTarget(
+  targetTabId: string | null | undefined,
+  activeTabId: string | null | undefined,
+  runtime: TodoRuntimePresentation & { ready: boolean; readOnly?: boolean },
+): string | null {
+  const target = String(targetTabId ?? "").trim();
+  if (!target || target !== String(activeTabId ?? "").trim()) return null;
+  if (!runtime.ready || runtime.readOnly || runtime.running || runtime.pendingPrompt) return null;
+  return target;
+}
+
 export function resolveTodoPanelTodos(
   canonical: Todo[] | null | undefined,
   live?: Todo[] | null,
@@ -95,10 +128,21 @@ export function shouldShowTodoPanel(
   todoKey: string | null | undefined,
   dismissedTodoKey: string | null,
   todos: Todo[],
+  persisted?: { batchKey?: string | null; batches?: readonly string[] | null },
 ): boolean {
   if (!todoKey || todos.length === 0) return false;
   if (hasIncompleteTodos(todos)) return true;
-  return todoKey !== dismissedTodoKey;
+  if (todoKey === dismissedTodoKey) return false;
+  const batchKey = String(persisted?.batchKey ?? "").trim();
+  if (batchKey && persisted?.batches?.includes(batchKey)) return false;
+  return true;
+}
+
+export function sameStringList(a?: readonly string[] | null, b?: readonly string[] | null): boolean {
+  if (a === b) return true;
+  const left = Array.isArray(a) ? a : [];
+  const right = Array.isArray(b) ? b : [];
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 export function shouldOpenTodoPanelByDefault(): boolean {

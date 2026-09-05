@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -218,8 +219,8 @@ func WithTeardownGrace(d time.Duration) Option {
 }
 
 // WithJobStartObserver observes every registered background job before its
-// goroutine starts. Delivery uses this to retain a workspace writer lease until
-// the job is truly terminal. The callback must return quickly.
+// goroutine starts. Delivery uses this to retain a workspace writer lease over
+// the job's opening writes. The callback must return quickly.
 func WithJobStartObserver(observer func(done <-chan struct{})) Option {
 	return func(m *Manager) { m.onJobStart = observer }
 }
@@ -635,7 +636,7 @@ func mutationEvidenceForArtifact(summary evidence.ChildEvidenceSummary) *artifac
 		return nil
 	}
 	return &artifactMutationEvidence{
-		Risk:  string(evidence.ClassifyMutationRisk(summary.Receipts, firstMutation)),
+		Risk:  string(evidence.ClassifyMutationRiskWithin(summary.Receipts, firstMutation, summary.WorkspaceRoot)),
 		Paths: summary.MutationPaths(),
 	}
 }
@@ -808,7 +809,7 @@ func (m *Manager) recordCompletion(parentSession, id, kind, label string, st Sta
 		text = fmt.Sprintf("background %s killed: %s", kind, id)
 	}
 	if shouldEmit {
-		m.sink.Emit(event.Event{Kind: event.Notice, Level: level, Text: text, Detail: detail})
+		m.sink.Emit(event.Event{Kind: event.Notice, Code: event.NoticeCodeBackgroundJobFinished, Level: level, Text: text, Detail: detail})
 	}
 }
 
@@ -823,17 +824,17 @@ func (m *Manager) recordStalled(parentSession, id, kind, label string) {
 		m.mu.Unlock()
 		return
 	}
-	text := fmt.Sprintf("%s may be stalled — still running after %s with no visible output. Inspect it with wait or bash_output, or stop it with kill_shell.", tag, m.stalledWarning.Round(time.Second))
+	quietFor := m.stalledWarning.Round(time.Second)
+	text := fmt.Sprintf("%s is still running after %s with no visible output — a quiet long-running job can look like this and is not necessarily stuck. If it should have finished, inspect it with wait or bash_output, or stop it with kill_shell. Tune or disable this check with tools.background_jobs.stalled_warning_seconds in your config (0 disables).", tag, quietFor)
 	m.completed = append(m.completed, completion{sessionID: parentSession, text: text})
 	active := m.active
 	shouldEmit := active == "" || parentSession == "" || active == parentSession
+	notice := event.Event{Kind: event.Notice, Level: event.LevelWarn,
+		Text:   fmt.Sprintf("background %s still running after %s with no visible output: %s", kind, quietFor, id),
+		Detail: "A quiet long-running job can look like this, so this is a heads-up, not an error. If it should have finished, inspect with wait or bash_output, or stop it with kill_shell. Set tools.background_jobs.stalled_warning_seconds to 0 in your config to disable this notice."}
 	m.mu.Unlock()
 	if shouldEmit {
-		m.sink.Emit(event.Event{
-			Kind:  event.Notice,
-			Level: event.LevelWarn,
-			Text:  fmt.Sprintf("background %s may be stalled: %s — still running after %s with no visible output; inspect with wait/bash_output or stop with kill_shell", kind, id, m.stalledWarning.Round(time.Second)),
-		})
+		m.sink.Emit(notice)
 	}
 }
 
@@ -1452,9 +1453,9 @@ func rebaseArtifactMigrationJobs(jobs []artifactMigrationJob, dir string) {
 }
 
 func unlockArtifactMigrationJobs(jobs []artifactMigrationJob) {
-	for i := len(jobs) - 1; i >= 0; i-- {
-		if jobs[i].job != nil {
-			jobs[i].job.mu.Unlock()
+	for _, v := range slices.Backward(jobs) {
+		if v.job != nil {
+			v.job.mu.Unlock()
 		}
 	}
 }
@@ -1905,16 +1906,23 @@ func jobKey(parentSession, id string) string {
 	return strings.TrimSpace(parentSession) + "\x00" + strings.TrimSpace(id)
 }
 
-// --- call-context injection (mirrors agent.CallContext) ---
+// call-context injection (mirrors agent.CallContext)
 
 type ctxKey struct{}
 type sessionCtxKey struct{}
 type jobCtxKey struct{}
+type noManager struct{}
 
 // WithManager stamps ctx with the job manager so tools can reach it via
 // FromContext. The agent sets this on every tool call's context.
 func WithManager(ctx context.Context, m *Manager) context.Context {
 	return context.WithValue(ctx, ctxKey{}, m)
+}
+
+// WithoutManager shadows an ancestor manager. Child agents without an owned
+// Jobs manager must not operate the parent's background jobs by inheritance.
+func WithoutManager(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ctxKey{}, noManager{})
 }
 
 // FromContext returns the job manager set by the agent, if any. ok is false for a
@@ -1946,7 +1954,7 @@ func PublishEvidence(ctx context.Context, summary evidence.ChildEvidenceSummary)
 		return
 	}
 	j.mu.Lock()
-	j.evidence.Receipts = append(j.evidence.Receipts, summary.Receipts...)
+	mergePublishedEvidence(&j.evidence, summary)
 	j.mu.Unlock()
 }
 
@@ -1996,7 +2004,7 @@ func (m *Manager) tryLeaseEvidenceForSession(parentSession, id string) (evidence
 	}
 	out := make([]evidence.Receipt, len(j.evidence.Receipts))
 	copy(out, j.evidence.Receipts)
-	return evidence.ChildEvidenceSummary{Receipts: out}, true
+	return evidence.ChildEvidenceSummary{Receipts: out, WorkspaceRoot: j.evidence.WorkspaceRoot}, true
 }
 
 // PendingEvidenceJobIDsForSession returns the IDs of parentSession's terminal

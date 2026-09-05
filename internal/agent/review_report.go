@@ -39,7 +39,10 @@ func (*ReviewReportTool) Schema() json.RawMessage {
 				"summary":{"type":"string"},
 				"path":{"type":"string"},
 				"line":{"type":"integer"}
-			},"required":["severity","summary"]}}
+			},"required":["severity","summary"]}},
+			"blocking_findings":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"summary":{"type":"string"},"path":{"type":"string"},"line":{"type":"integer"}}}},
+			"non_blocking":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string"},"summary":{"type":"string"},"path":{"type":"string"},"line":{"type":"integer"}}}},
+			"required_changes":{"type":"array","items":{"type":"string"}}
 		},
 		"required":["kind","verdict","reviewed_paths"]
 	}`)
@@ -107,8 +110,8 @@ func AttachReviewReportTool(reg *tool.Registry) {
 // HasSuccessfulReviewReport reports whether this agent's evidence ledger holds
 // a successful review_report of the given kind.
 func (a *Agent) HasSuccessfulReviewReport(kind evidence.ReviewKind) bool {
-	if a == nil || a.evidence == nil {
+	if a == nil || a.task.ledger == nil {
 		return false
 	}
-	return a.evidence.HasSuccessfulReviewReportOfKind(kind)
+	return a.task.ledger.HasSuccessfulReviewReportOfKind(kind)
 }

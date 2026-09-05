@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -80,6 +81,7 @@ func cachedBashShellPATH(ctx context.Context) string {
 // the execution context overrides this for sub-agent isolation.
 type bash struct {
 	sb      sandbox.Spec
+	rootSet *sandbox.WritableRootSet
 	shell   sandbox.Shell
 	guard   SessionDataGuard
 	workDir string
@@ -93,9 +95,11 @@ type bash struct {
 }
 
 type bashParams struct {
-	Command                     string `json:"command"`
-	RunInBackground             bool   `json:"run_in_background"`
-	PreserveBackgroundProcesses bool   `json:"preserve_background_processes"`
+	Command                     string   `json:"command"`
+	RunInBackground             bool     `json:"run_in_background"`
+	PreserveBackgroundProcesses bool     `json:"preserve_background_processes"`
+	AdditionalWriteDirs         []string `json:"additional_write_dirs,omitempty"`
+	Justification               string   `json:"justification,omitempty"`
 }
 
 func (bash) Name() string { return "bash" }
@@ -118,7 +122,9 @@ func (b bash) Description() string {
 			"  - multi-line text to a native exe (e.g. git commit -m): use a single-quoted here-string @'...'@ (closing '@ at column 0)."+
 			bashToolSteer, shellName, chaining)
 	}
-	return "Execute a command in the shell and return combined stdout/stderr." + bashToolSteer
+	return "Execute a command in the shell and return combined stdout/stderr. " +
+		"To write outside the workspace, pass additional_write_dirs with the smallest concrete directories (no globs; absolute, workspace-relative, ~, or ${HOME}) and a justification. " +
+		"The host will not infer write paths from the command text." + bashToolSteer
 }
 
 // bashToolSteer points the model at the cross-platform built-in tools instead of
@@ -136,10 +142,6 @@ func (b bash) resolved() sandbox.Shell {
 		return b.sb.Shell
 	}
 	return sandbox.ResolveShell("", "", nil)
-}
-
-func (bash) Schema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"run_in_background":{"type":"boolean","description":"Run detached: returns a job id immediately and keeps running across turns (no foreground timeout). Read new output with bash_output, wait with wait, stop it with kill_shell. Use for long-running commands like servers, watchers, or builds you don't need to block on."},"preserve_background_processes":{"type":"boolean","description":"After the shell command exits normally, keep any process-group members it intentionally left behind. Use only for deliberate daemonization, browser/GUI/session launchers such as playwright-cli open, or nohup/disown/setsid; cancellation and timeouts still kill the process group."}},"required":["command"]}`)
 }
 
 // ReadOnly is false: bash's effect cannot be inferred from args (rm, curl,
@@ -179,18 +181,10 @@ func (b bash) ExecuteDetailed(ctx context.Context, args json.RawMessage) (tool.D
 
 	var p bashParams
 	if err := json.Unmarshal(args, &p); err != nil {
-		ex.State = tool.ShellStateNotRun
-		ex.FailurePhase = tool.ShellPhasePreflight
-		ex.MutationRisk = tool.ShellMutationNotStarted
-		ex.DurationMs = time.Since(start).Milliseconds()
-		return tool.DetailedResult{Execution: ex}, fmt.Errorf("invalid args: %w", err)
+		return bashPreflightFailure(ex, start, fmt.Errorf("invalid args: %w", err))
 	}
-	if p.Command == "" {
-		ex.State = tool.ShellStateNotRun
-		ex.FailurePhase = tool.ShellPhasePreflight
-		ex.MutationRisk = tool.ShellMutationNotStarted
-		ex.DurationMs = time.Since(start).Milliseconds()
-		return tool.DetailedResult{Execution: ex}, fmt.Errorf("command is required")
+	if err := validateBashParams(p); err != nil {
+		return bashPreflightFailure(ex, start, err)
 	}
 
 	sh := b.resolved()
@@ -266,7 +260,7 @@ func (b bash) ExecuteDetailed(ctx context.Context, args json.RawMessage) (tool.D
 			if jobLease != nil {
 				defer jobLease.Release()
 			}
-			cmd := exec.CommandContext(jobCtx, argv[0], argv[1:]...)
+			cmd := proc.CommandContext(jobCtx, argv[0], argv[1:]...)
 			cmd.Dir = workDir
 			cmd.Env = cmdEnv
 			cmd.WaitDelay = bashWaitDelay
@@ -294,7 +288,7 @@ func (b bash) ExecuteDetailed(ctx context.Context, args json.RawMessage) (tool.D
 	mergeRunInto(ex, runEx)
 	ex.DurationMs = time.Since(start).Milliseconds()
 	return tool.DetailedResult{
-		Output:    appendSessionDataHint(out, b.guard.CommandHint(b.workDir, p.Command)),
+		Output:    b.appendWriteHints(ctx, out, err, p, wrapped),
 		Execution: ex,
 	}, err
 }
@@ -367,7 +361,7 @@ func (b bash) prepareLaunch(ctx context.Context, sh sandbox.Shell, command strin
 
 	// bashSandboxCommand is injectable for tests; production points at
 	// sandbox.Command. Attach SessionTemp so Linux bwrap binds the private dir.
-	spec := b.sb
+	spec := b.specForCall(ctx)
 	spec.SessionTemp = sessionDir
 	argv, wrapped := bashSandboxCommand(spec, sh, command)
 	linuxSB := wrapped && sessionDir != "" && runtime.GOOS == "linux"
@@ -554,7 +548,7 @@ func shouldReapAfterRun(ctx context.Context, sh sandbox.Shell, command string, p
 	if preserveBackgroundProcesses {
 		return false
 	}
-	return sh.Kind != sandbox.ShellBash || !hasExplicitBackgroundKeepalive(command)
+	return !sh.Kind.IsPOSIX() || !hasExplicitBackgroundKeepalive(command)
 }
 
 // hasExplicitBackgroundKeepalive detects common shell-level daemonization intent
@@ -602,7 +596,7 @@ func shouldTrackShellProcess(wrapped bool, sh sandbox.Shell, command string, pre
 	if runtime.GOOS == "windows" && wrapped {
 		return false
 	}
-	return sh.Kind != sandbox.ShellBash || !hasExplicitBackgroundKeepalive(command)
+	return !sh.Kind.IsPOSIX() || !hasExplicitBackgroundKeepalive(command)
 }
 
 func runShellProcess(ctx context.Context, cmd *exec.Cmd, sh sandbox.Shell, command string, track bool) (*proc.TrackedCommand, error) {
@@ -629,7 +623,7 @@ func reapShellProcess(cmd *exec.Cmd, tracked *proc.TrackedCommand) {
 // PowerShell chaining guard.
 func hasUnquotedSeq(s, seq string) bool {
 	var quote byte
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if quote != 0 {
 			if c == quote {
@@ -736,7 +730,7 @@ func loginShell() string {
 func runShellPATHCommand(parent context.Context, shell string, args []string) []byte {
 	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, shell, args...)
+	cmd := proc.CommandContext(ctx, shell, args...)
 	// Explicit env so the login-shell probe honors [secrets]
 	// filter_subprocess_env instead of inheriting the full environment.
 	cmd.Env = secrets.ProcessEnv()
@@ -748,9 +742,9 @@ func runShellPATHCommand(parent context.Context, shell string, args []string) []
 
 func parseShellPATH(out []byte, marker string) string {
 	lines := strings.Split(strings.ReplaceAll(string(out), "\r\n", "\n"), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.HasPrefix(lines[i], marker) {
-			return strings.TrimSpace(strings.TrimPrefix(lines[i], marker))
+	for _, line := range slices.Backward(lines) {
+		if rest, ok := strings.CutPrefix(line, marker); ok {
+			return strings.TrimSpace(rest)
 		}
 	}
 	return ""
@@ -789,8 +783,8 @@ func setEnvValue(env []string, key, value string) []string {
 }
 
 func envValue(env []string, key string) (string, bool) {
-	for i := len(env) - 1; i >= 0; i-- {
-		k, v, ok := strings.Cut(env[i], "=")
+	for _, entry := range slices.Backward(env) {
+		k, v, ok := strings.Cut(entry, "=")
 		if ok && envKeyEqual(k, key) {
 			return v, true
 		}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -266,6 +267,14 @@ func serveRemoteMarkdownImage(
 		http.Error(w, "remote response is not a supported image", http.StatusUnsupportedMediaType)
 		return
 	}
+	if err := validateMarkdownImageBytes(body, mimeType); err != nil {
+		if errors.Is(err, errMarkdownImageTooLarge) {
+			http.Error(w, "remote image exceeds the decode budget", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "remote response is not a valid image", http.StatusUnsupportedMediaType)
+		return
+	}
 
 	w.Header().Set("Content-Type", mimeType)
 	w.Header().Set("Cache-Control", "private, max-age=600")
@@ -383,7 +392,7 @@ func sanitizeRemoteMarkdownSVG(body []byte) ([]byte, bool) {
 
 	for {
 		token, err := decoder.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

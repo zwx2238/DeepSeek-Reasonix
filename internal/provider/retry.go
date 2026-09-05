@@ -225,10 +225,7 @@ func backoffDelay(attempt int, retryAfter time.Duration) time.Duration {
 		}
 		return retryAfter
 	}
-	d := time.Duration(1<<(attempt-1)) * 500 * time.Millisecond
-	if d > maxBackoff {
-		d = maxBackoff
-	}
+	d := min(time.Duration(1<<(attempt-1))*500*time.Millisecond, maxBackoff)
 	return d + time.Duration(rand.Intn(250))*time.Millisecond
 }
 
@@ -335,6 +332,15 @@ func SendWithRetry(ctx context.Context, httpClient *http.Client, opts SendOption
 			TraceID:  responseTraceID(resp.Header),
 		}
 		if !RetryableStatus(resp.StatusCode) {
+			if limitErr := ParseOutputLimitError(apiErr); limitErr != nil {
+				return nil, limitErr
+			}
+			if limitErr := ParseContextLimitError(apiErr); limitErr != nil {
+				return nil, limitErr
+			}
+			if replayErr := ParseReasoningReplayError(apiErr); replayErr != nil {
+				return nil, replayErr
+			}
 			return nil, apiErr
 		}
 		lastErr = apiErr

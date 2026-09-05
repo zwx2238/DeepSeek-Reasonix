@@ -1,7 +1,7 @@
-// Package provider defines the model-backend abstraction and a registry mapping
-// a provider "kind" to a factory. Concrete implementations live in subpackages
-// (e.g. provider/openai) and self-register via init(). The core resolves
-// providers by kind from config and never hardcodes a specific model.
+// Package provider defines the model-backend abstraction and a registry mappinga provider "kind" toafactory.
+// Concrete implementations live in subpackages
+// (e.g. provider/openai) and self-register via init().
+// Thecoreresolvesprovidersbykindfromconfigandneverhardcodes a specific model.
 package provider
 
 import (
@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -31,10 +32,9 @@ const (
 	RoleTool      Role = "tool"
 )
 
-// LocalOnlyToolName/ID make display-only records safe when a newer transcript
-// is opened by an older Reasonix binary that does not know Message.LocalOnly.
-// Old wire normalization treats this unmatched tool result as an orphan and
-// drops it instead of replaying partial content to the model.
+// LocalOnlyToolName/ID make display-only records safe when a newer transcriptis opened by an older
+// Reasonixbinary that does not know Message.LocalOnly.
+// Oldwirenormalizationtreatsthisunmatchedtoolresultasanorphananddropsitinsteadofreplayingpartialcontenttothemodel.
 const (
 	LocalOnlyToolName = "__reasonix_local_only__"
 	LocalOnlyToolID   = "__reasonix_local_only__"
@@ -43,63 +43,79 @@ const (
 // Message is a single conversation message.
 type Message struct {
 	Role Role `json:"role"`
-	// Content is the provider-visible conversation content. Keeping this legacy
-	// field provider-visible preserves replay for older CLI/Desktop releases.
+	// Origin distinguishes real user input from host-generated user-role protocol
+	// messages. omitempty keeps legacy sessions readable by previous releases.
+	Origin MessageOrigin `json:"origin,omitempty"`
+	// Content is the provider-visible conversation content.
+	// Keepingthislegacyfieldprovider-visiblepreservesreplay for older CLI/Desktop releases.
 	Content string `json:"content,omitempty"`
-	// RawContent is the user-authored form of a user turn, when it differs from
-	// Content because the host added transient context. Older releases ignore
-	// this field and still replay the provider-visible Content safely.
+	// RawContent holds the full local original when it differs from Content.
+	// Provider projections always strip it; bounded
+	// Contentisthestablewirerepresentationandkeepssessionfilessafefor older readers.
 	RawContent string `json:"raw_content,omitempty"`
 	// ProviderContent is a transitional field written by early Context Engine v2
 	// builds. Loaders migrate it into Content/RawContent before normal use.
 	ProviderContent  string   `json:"provider_content,omitempty"`
-	Images           []string `json:"images,omitempty"`            // data URLs (data:<mime>;base64,…) on user (attachments) and tool (MCP image results) messages; embedded only for vision-capable models
+	Images           []string `json:"images,omitempty"`            // vision refs: data URLs, http(s) image URLs, or Files API file-api- ids; embedded only for vision-capable models
 	ReasoningContent string   `json:"reasoning_content,omitempty"` // assistant: thinking-mode chain-of-thought, round-tripped on multi-turn
-	// ReasoningID is the provider-issued identifier of the reasoning item
-	// (OpenAI Responses schema: Reasoning.id is required on input items).
-	// Captured from the streamed output item and round-tripped back into
-	// the input on subsequent turns, matching the wire schema.
+	// ReasoningID is the provider-issued reasoning-item id (OpenAI Responses:
+	// Reasoning.id is required on input items),
+	// capturedfromthestreamedoutputitemandround-trippedbackintolaterinputs.
 	ReasoningID string `json:"reasoning_id,omitempty"`
 	// ReasoningStatus is the final status of the reasoning item
 	// ("in_progress" | "completed") as issued by the server's done event,
 	// round-tripped back into the input alongside ReasoningID.
 	ReasoningStatus string `json:"reasoning_status,omitempty"`
-	// ReasoningSignature is an opaque, provider-issued proof that ReasoningContent
-	// is genuine model output. Anthropic requires the signed thinking block be
-	// replayed on the next turn when a tool call followed thinking; providers
-	// without signed reasoning (e.g. the openai-compatible ones) leave it empty.
-	// Round-tripped alongside ReasoningContent.
+	// ReasoningSignature is an opaque, provider-issued proof that ReasoningContentis genuine model output.
+	// Anthropic requires the signed thinking block be replayed on the next turn when a toolcallfollowedthinking;
+	// providers without signed reasoning (e.g. the openai-compatible ones) leave it empty.
 	ReasoningSignature string     `json:"reasoning_signature,omitempty"`
 	ToolCalls          []ToolCall `json:"tool_calls,omitempty"` // set by assistant
-	// ResponsesItems preserves provider-issued Responses API output items that
-	// must be replayed on a stateless follow-up. Today only DeepSeek
-	// web_search_call items use this path; other providers ignore the field.
-	// Keeping the opaque JSON on the assistant turn makes resume/restart safe,
-	// while omitempty keeps old session files byte-compatible when unused.
-	ResponsesItems  []json.RawMessage `json:"responses_items,omitempty"`
-	ToolCallID      string            `json:"tool_call_id,omitempty"`    // links a tool result to its call
-	Name            string            `json:"name,omitempty"`            // tool message: tool name
-	MemoryCitations []MemoryCitation  `json:"memoryCitations,omitempty"` // local UI metadata; provider requests ignore it
-	WorkDurationMs  int64             `json:"workDurationMs,omitempty"`  // local UI metadata; provider requests ignore it
-	CreatedAt       int64             `json:"createdAt,omitempty"`       // local UI metadata; unix milliseconds; stripped before provider requests
-	Edited          bool              `json:"edited,omitempty"`          // local UI metadata; provider requests ignore it
-	Original        string            `json:"original,omitempty"`        // user prompt before inline edit
-	// LocalOnly marks durable transcript content that must never be sent to a
-	// model provider. Interrupted streaming output uses it so every frontend can
-	// replay what the user saw without feeding partial reasoning or tool-call
-	// arguments back into the next request.
+	// ResponsesItems preserves provider-issued Responses API output items forstateless replay.
+	// omitemptykeepsoldsession files byte-compatible.
+	ResponsesItems  []json.RawMessage  `json:"responses_items,omitempty"`
+	ServerSearch    []ServerSearchCall `json:"server_search,omitempty"`   // cards + Anthropic replay; omitempty
+	ToolCallID      string             `json:"tool_call_id,omitempty"`    // links a tool result to its call
+	Name            string             `json:"name,omitempty"`            // tool message: tool name
+	MemoryCitations []MemoryCitation   `json:"memoryCitations,omitempty"` // local UI metadata; provider requests ignore it
+	WorkDurationMs  int64              `json:"workDurationMs,omitempty"`  // local UI metadata; provider requests ignore it
+	CreatedAt       int64              `json:"createdAt,omitempty"`       // local UI metadata; unix milliseconds; stripped before provider requests
+	Edited          bool               `json:"edited,omitempty"`          // local UI metadata; provider requests ignore it
+	Original        string             `json:"original,omitempty"`        // user prompt before inline edit
+	// LocalOnly marks durable transcript content that must never be sent to amodel provider.
+	// Interruptedstreamingoutputusesitsoeveryfrontendcanreplaywhattheusersawwithoutfeedingpartialreasoningortool-callargumentsbackintothenextrequest.
 	LocalOnly       bool             `json:"local_only,omitempty"`
 	DecisionReceipt *DecisionReceipt `json:"decision_receipt,omitempty"`
-	// DecisionReceipts are local-only metadata attached to a provider-visible
-	// message. Keeping them on the existing assistant record preserves the
-	// assistant/tool-result adjacency required by current and older readers.
+	// DecisionReceipts are local-only metadata attached to a provider-visiblemessage.
+	// Keepingthemontheexistingassistantrecordpreservestheassistant/tool-resultadjacencyrequiredbycurrentandolderreaders.
 	// ModelMessages strips the field before handing requests to providers.
 	DecisionReceipts []*DecisionReceipt       `json:"decision_receipts,omitempty"`
 	InterruptedTurn  *InterruptedTurnRecovery `json:"interrupted_turn,omitempty"`
-	// ToolExecution is local shell UI metadata on tool-result messages. It is
-	// persisted for Desktop/CLI/Serve cards and stripped by ModelMessages before
-	// any provider request so tool schemas and prompt-cache prefixes stay stable.
+	// FinalReadinessRecovery is durable host state on a LocalOnly sentinel.
+	// ModelMessages removes it before provider serialization.
+	FinalReadinessRecovery *FinalReadinessRecovery `json:"final_readiness_recovery,omitempty"`
+	// ToolExecution is local shell UI metadata on tool-result messages. It ispersisted for
+	// Desktop/CLI/Servecards and stripped by
+	// ModelMessagesbeforeanyproviderrequestsotoolschemasandprompt-cacheprefixes stay stable.
 	ToolExecution *ToolExecution `json:"tool_execution,omitempty"`
+	// MCPApp is the local MCP Apps presentation for results from App-capableservers. Persisted for
+	// Desktopcardsand stripped by ModelMessages;
+	// provider serializers must never emit it on the wire.
+	MCPApp *MCPAppPresentation `json:"mcp_app,omitempty"`
+	// VisionSummary is durable local metadata generated by an optional imageunderstanding prepass.
+	// Itiscopiedinto provider-visible Content by theturn owner and stripped at the provider boundary.
+	VisionSummary *VisionSummary `json:"vision_summary,omitempty"`
+}
+
+// VisionSummary is a bounded, provider-independent description of one userturn's image attachments.
+// Itcontains no image bytes, paths, or reasoning.
+type VisionSummary struct {
+	Version       int      `json:"version"`
+	PromptVersion string   `json:"prompt_version"`
+	ModelRef      string   `json:"model_ref"`
+	ImageDigests  []string `json:"image_digests"`
+	Summary       string   `json:"summary"`
+	CreatedAt     int64    `json:"created_at"`
 }
 
 // ToolExecution is host-local shell metadata mirrored from tool.ShellExecution.
@@ -119,9 +135,9 @@ type ToolExecution struct {
 	DurationMs     int64  `json:"durationMs,omitempty"`
 }
 
-// DecisionReceipt is durable, provider-excluded evidence of a user-owned
-// approval decision. It intentionally contains only bounded labels and the
-// outcome, never free-form guidance or provider-visible content.
+// DecisionReceipt is durable, provider-excluded evidence of a user-ownedapproval decision.
+// Itintentionallycontains only bounded labels and theoutcome,
+// neverfree-formguidanceorprovider-visiblecontent.
 type DecisionReceipt struct {
 	ID      string `json:"id"`
 	Kind    string `json:"kind"`
@@ -130,10 +146,10 @@ type DecisionReceipt struct {
 	Outcome string `json:"outcome"`
 }
 
-// InterruptedTurnRecovery is the durable, provider-excluded handoff for a turn
-// that stopped before producing a clean final answer. It contains only bounded
-// structural facts; raw partial reasoning remains on the LocalOnly Message for
-// display and is never copied into the recovery prompt.
+// InterruptedTurnRecovery is the durable,
+// provider-excludedhandoffforaturnthatstoppedbeforeproducingacleanfinal answer.
+// Itcontainsonlyboundedstructural facts; raw partial reasoning remains on the LocalOnly
+// Messagefordisplayandisnevercopiedintotherecovery prompt.
 type InterruptedTurnRecovery struct {
 	Pending                 bool                     `json:"pending,omitempty"`
 	CompletedTools          []InterruptedToolSummary `json:"completed_tools,omitempty"`
@@ -142,9 +158,8 @@ type InterruptedTurnRecovery struct {
 	DroppedPartialReasoning bool                     `json:"dropped_partial_reasoning,omitempty"`
 }
 
-// InterruptedToolSummary records a completed, fully paired tool call without
-// duplicating its arguments or result. The canonical assistant/tool messages
-// immediately before the recovery record remain the source of truth.
+// InterruptedToolSummary records a completed, fully paired tool call withoutduplicatingitsargumentsorresult.
+// The canonical assistant/tool messagesimmediately before the recovery record remain the source of truth.
 type InterruptedToolSummary struct {
 	ID      string   `json:"id,omitempty"`
 	Name    string   `json:"name"`
@@ -153,8 +168,8 @@ type InterruptedToolSummary struct {
 	Removed int      `json:"removed,omitempty"`
 }
 
-// MemoryCitation is local display metadata for memories that influenced an
-// assistant turn. Provider implementations must not forward it to model APIs.
+// MemoryCitation is local display metadata for memories that influenced anassistant turn.
+// Providerimplementations must not forward it to model APIs.
 type MemoryCitation struct {
 	ID        string `json:"id,omitempty"`
 	Source    string `json:"source"`
@@ -164,8 +179,8 @@ type MemoryCitation struct {
 	Kind      string `json:"kind,omitempty"`
 }
 
-// ParseImageDataURL splits a `data:<media-type>;base64,<payload>` URL into its
-// media type and base64 payload. ok is false for anything that isn't a base64
+// ParseImageDataURL splits a `data:<media-type>;base64,<payload>` URL into itsmedia type and base64 payload.
+// ok is false for anything that isn't a base64
 // data URL — providers that need the split (Anthropic) skip those silently.
 func ParseImageDataURL(dataURL string) (mediaType, base64Data string, ok bool) {
 	rest, found := strings.CutPrefix(dataURL, "data:")
@@ -188,16 +203,15 @@ type ToolCall struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
-	// ThoughtSignature is an opaque Gemini-issued proof attached to a function
-	// call. OpenAI-compatible Gemini endpoints require it on message replay.
+	// ThoughtSignature is an opaque Gemini-issued proof attached to a functioncall. OpenAI-compatible
+	// Geminiendpoints require it on message replay.
 	ThoughtSignature string `json:"thought_signature,omitempty"`
 	Diff             string `json:"diff,omitempty"`
 	Added            int    `json:"added,omitempty"`
 	Removed          int    `json:"removed,omitempty"`
-	// Resolved* fields are Reasonix-local display metadata for stable proxy
-	// calls such as use_capability. Provider request builders deliberately
-	// serialize only provider-visible fields, so these values never alter the
-	// provider-visible conversation or prompt-cache prefix.
+	// Resolved* fields are Reasonix-local display metadata for stable proxycalls such as use_capability.
+	// Provider request builders deliberatelyserialize only provider-visible fields,
+	// sothesevaluesneveraltertheprovider-visible conversation orprompt-cache prefix.
 	ResolvedName     string `json:"resolved_name,omitempty"`
 	CapabilityID     string `json:"capability_id,omitempty"`
 	ResolvedReadOnly *bool  `json:"resolved_read_only,omitempty"`
@@ -208,6 +222,9 @@ type ToolSchema struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters"`
+	Deferred    bool            `json:"deferred,omitempty"`
+	Strict      bool            `json:"strict,omitempty"`
+	Namespace   string          `json:"namespace,omitempty"`
 }
 
 // Request is a single completion request.
@@ -216,10 +233,12 @@ type Request struct {
 	Tools       []ToolSchema
 	Temperature *float64 // nil = omit; non-nil = send the value, including 0
 	MaxTokens   int
-	// ResponseFormat, when non-nil, asks the endpoint for structured JSON
-	// output (Responses: text.format.type=json_object). Nil omits the field
-	// entirely — the common path must stay byte-stable for prompt caching.
+	// ResponseFormat, when non-nil, asks the endpoint for structured JSONoutput (Responses:
+	// text.format.type=json_object). Nil omits the fieldentirely —
+	// thecommonpathmuststaybyte-stableforpromptcaching.
 	ResponseFormat *ResponseFormat `json:"ResponseFormat,omitempty"`
+	EffortOverride string          `json:"EffortOverride,omitempty"` // per-call reasoning-depth override; adapters apply it only when the endpoint's effort vocabulary accepts it
+	ToolSearch     *ToolSearch     `json:"-"`
 }
 
 // ResponseFormat asks a provider to constrain its output shape.
@@ -229,24 +248,33 @@ type ResponseFormat struct {
 	Type string `json:"type"`
 }
 
-// DefaultReasoningOutputTokens is the conservative provider-side budget used
-// for official reasoning APIs whose documented contract safely accepts 32K.
-// Unknown compatible gateways must opt in through configuration instead of
-// inheriting this value merely because they implement an OpenAI-shaped wire.
-const DefaultReasoningOutputTokens = 32 * 1024
+// Auto ladder for max_output_tokens=0. Bounds completion only; never compact_ratio.
+// Official DeepSeek does not use this ladder: Chat/Responses omit the field
+// (server 384K ceiling) and Anthropic sends DeepSeekMaxOutputTokens.
+const (
+	DefaultOrdinaryOutputTokens      = 16 * 1024  // non-reasoning / non-DeepSeek
+	DefaultReasoningOutputTokens     = 32 * 1024  // ordinary reasoning / MiMo
+	DefaultHighReasoningOutputTokens = 64 * 1024  // high/max effort on non-DeepSeek
+	DefaultHighOutputTokens          = 128 * 1024 // explicit only; never auto
+	// DeepSeekMaxOutputTokens is the official V4 Flash/Pro completion ceiling.
+	// Pricing page: 输出长度最大 384K. K is decimal thousands, matching thedocumented 1M context = 1,000,000 tokens.
+	// Anthropic requires max_tokens.
+	DeepSeekMaxOutputTokens = 384_000
+)
 
-// TemperaturePtr wraps v in a pointer so callers that explicitly want a
-// specific temperature, including 0 for deterministic output, can distinguish
-// that intent from "not set, use the provider default".
-func TemperaturePtr(v float64) *float64 { return &v }
-
-// OptionalTemperature returns nil when v is zero, matching the historical
-// config behavior where 0 meant "not configured", and a pointer otherwise.
-func OptionalTemperature(v float64) *float64 {
-	if v == 0 {
-		return nil
+// AutoOutputBudget maps max_output_tokens=0 to 16K/32K/64K for non-DeepSeekvendors. Official
+// DeepSeekomitsthe field (Chat/Responses) or sends
+// DeepSeekMaxOutputTokens (Anthropic).
+func AutoOutputBudget(reasoningEnabled bool, effort string) int {
+	if !reasoningEnabled {
+		return DefaultOrdinaryOutputTokens
 	}
-	return &v
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "high", "max":
+		return DefaultHighReasoningOutputTokens
+	default:
+		return DefaultReasoningOutputTokens
+	}
 }
 
 // interruptedToolResult stands in for a tool result that never landed — an
@@ -256,83 +284,47 @@ func OptionalTemperature(v float64) *float64 {
 // responding to each 'tool_call_id'".
 const interruptedToolResult = "[no result: the previous turn was interrupted before this tool call completed]"
 
-// SanitizeToolPairing is the provider-side alias for NormalizeMessages. It repairs
-// a history so it satisfies the tool-call contract the OpenAI-compatible and
-// Anthropic APIs enforce (every assistant tool_calls answered, no orphan tool
-// messages, truncated args closed) right before sending it to the wire — without
-// touching the stored session. Kept as a distinct name so call sites read as
+// SanitizeToolPairing is the provider-side alias for NormalizeMessages.
+// Itrepairsahistorysoitsatisfiesthetool-call contract the OpenAI-compatible and
+// Anthropic APIs enforce (every assistant tool_calls answered, no orphan toolmessages, truncated argsclosed)
+// right before sending it to the wire — withouttouching the stored session.
+// Keptasadistinctnamesocallsitesread as
 // "defensive wire prep" rather than "session mutation".
 func SanitizeToolPairing(msgs []Message) []Message { return NormalizeMessages(msgs) }
 
-// ModelMessages removes durable display-only records before a request is
-// handed to any provider. Healthy sessions without such records keep their
-// original backing slice, preserving the allocation and prompt-cache fast path.
-func ModelMessages(msgs []Message) []Message {
-	needsCopy := false
-	for _, m := range msgs {
-		if m.LocalOnly || m.RawContent != "" || m.ProviderContent != "" || m.DecisionReceipt != nil || len(m.DecisionReceipts) > 0 || m.ToolExecution != nil {
-			needsCopy = true
-			break
-		}
-	}
-	if !needsCopy {
-		return msgs
-	}
-	out := make([]Message, 0, len(msgs))
-	for _, candidate := range msgs {
-		if candidate.LocalOnly {
-			continue
-		}
-		if candidate.ProviderContent != "" {
-			candidate.Content = candidate.ProviderContent
-			candidate.ProviderContent = ""
-		}
-		candidate.RawContent = ""
-		candidate.DecisionReceipt = nil
-		candidate.DecisionReceipts = nil
-		// Local shell metadata must never enter provider request bytes.
-		candidate.ToolExecution = nil
-		out = append(out, candidate)
-	}
-	return out
-}
-
-// NormalizeMessages repairs a conversation history so it satisfies the tool-call
-// contract the OpenAI-compatible and Anthropic APIs enforce: every assistant
-// tool_calls entry must be answered by a following tool message for its id, and a
-// tool message must follow such a call. It backfills a placeholder result for any
-// unanswered call (so the turn stays intact), drops orphan tool messages,
-// backfills empty tool-call names from their results (#4727 — old sessions saved
-// before adde2d3e can carry an empty name), and closes truncated call-argument
+// NormalizeMessages repairs a conversation history so it satisfies the tool-callcontract the
+// OpenAI-compatible and Anthropic APIs enforce:
+// everyassistanttool_callsentrymustbeansweredbyafollowingtoolmessage for its id,
+// andatoolmessagemustfollowsuch a call. It backfills a placeholder result for anyunanswered call
+// (sotheturnstaysintact),
+// dropsorphan tool messages,
+// backfills empty tool-call names from their results (#4727 —
+// oldsessionssavedbeforeadde2d3ecancarryanemptyname), and closes truncated call-argument
 // JSON (DeepSeek 400s on replayed half-streamed args, #3953).
 //
-// This is the wire-safe entry point for provider requests. Stored session loads
-// use NormalizeSessionMessages so they can share the assistant-turn repairs
-// without deleting standalone tool messages that must round-trip through
-// reasonix --resume.
+// This is the wire-safe entry point for provider requests. Stored session loadsuse
+// NormalizeSessionMessagessotheycansharetheassistant-turnrepairswithoutdeletingstandalonetoolmessagesthatmustround-tripthroughreasonix
+// --resume.
 //
 // A well-formed history — no unanswered calls, no orphan results, no empty tool-
-// call names, no truncated args — returns the input slice unchanged (same backing
-// array, zero allocation). This keeps the prefix-cache key stable for healthy
-// sessions and makes repeated normalization cheap.
+// call names, no truncated args — returns the input slice unchanged (same backingarray, zero allocation).
+// This keeps the prefix-cache key stable for healthysessions and makes repeated normalization cheap.
 func NormalizeMessages(msgs []Message) []Message {
 	return normalizeMessages(msgs, true)
 }
 
-// NormalizeSessionMessages applies only repairs that are safe to persist in a
-// saved session. It shares assistant-turn repairs with NormalizeMessages, but
-// preserves existing tool messages instead of dropping or reordering them so
-// Save/LoadSession remains a byte-for-byte conversation round trip for histories
-// that were already on disk.
+// NormalizeSessionMessages applies only repairs that are safe to persist in asaved session.
+// Itsharesassistant-turn repairs with NormalizeMessages,
+// butpreservesexistingtoolmessagesinsteadofdroppingorreordering them so
+// Save/LoadSession remains a byte-for-byte conversation round trip for historiesthat were already on disk.
 func NormalizeSessionMessages(msgs []Message) []Message {
 	return normalizeMessages(attachStandaloneDecisionReceipts(msgs), false)
 }
 
-// attachStandaloneDecisionReceipts migrates the short-lived receipt encoding
-// that stored a LocalOnly assistant message between an assistant tool call and
-// its result. Folding that metadata into the latest assistant message repairs
-// already-written sessions before tool-pair normalization can fabricate a
-// placeholder. Healthy histories return the original slice unchanged.
+// attachStandaloneDecisionReceipts migrates the short-lived receipt encodingthat stored a
+// LocalOnlyassistantmessage between an assistant tool call andits result.
+// Foldingthatmetadataintothelatestassistantmessagerepairsalready-writtensessionsbeforetool-pairnormalizationcanfabricateaplaceholder.
+// Healthyhistoriesreturntheoriginalsliceunchanged.
 func attachStandaloneDecisionReceipts(msgs []Message) []Message {
 	target := -1
 	needsMigration := false
@@ -392,11 +384,10 @@ func normalizeMessages(msgs []Message, dropOrphanTools bool) []Message {
 			for j < len(msgs) && msgs[j].Role == RoleTool && !msgs[j].LocalOnly {
 				j++
 			}
-			// Backfill empty tool-call names from the corresponding tool
-			// results so the model sees which tool was invoked (#4727).
-			// The wire-format fix (openai.go) ensures empty fields are
-			// never omitted, so this backfill is a UX improvement, not a
-			// correctness requirement.
+			// Backfill empty tool-call names from the corresponding toolresults so the model sees which tool was invoked
+			// (#4727).
+			// The wire-format fix (openai.go) ensures empty fields arenever omitted, so this backfill is a
+			// UXimprovement, not acorrectness requirement.
 			calls := backfillToolCallNames(m.ToolCalls, msgs[i+1:j])
 			m.ToolCalls = calls
 			out = append(out, repairToolCallArgs(m))
@@ -422,9 +413,9 @@ func normalizeMessages(msgs []Message, dropOrphanTools bool) []Message {
 	return out
 }
 
-// tryNormalizeFastPath reports whether msgs needs no repair and, if so, returns
-// it as-is so the caller can skip allocating. Healthy tool-call/tool-result
-// turns pass through unchanged; malformed turns take the slow path.
+// tryNormalizeFastPath reports whether msgs needs no repair and, if so,
+// returnsitas-issothecallercanskipallocating. Healthy tool-call/tool-resultturns pass through unchanged;
+// malformed turns take the slow path.
 func tryNormalizeFastPath(msgs []Message, dropOrphanTools bool) ([]Message, bool) {
 	for i := 0; i < len(msgs); {
 		m := msgs[i]
@@ -483,9 +474,9 @@ func needsToolCallArgRepair(calls []ToolCall) bool {
 	return false
 }
 
-// repairToolCallArgs returns m with any undecodable tool-call Arguments closed
-// into valid JSON (copy-on-write; the caller's history is never mutated). Empty
-// arguments pass through — some gateways send "" for no-arg tools.
+// repairToolCallArgs returns m with any undecodable tool-call Arguments closedinto valid JSON
+// (copy-on-write; the caller's history is never mutated). Emptyarguments pass through — some gateways send
+// "" for no-arg tools.
 func repairToolCallArgs(m Message) Message {
 	broken := false
 	for _, tc := range m.ToolCalls {
@@ -510,12 +501,12 @@ func repairToolCallArgs(m Message) Message {
 }
 
 // closeTruncatedJSON best-effort completes a JSON document cut off mid-stream
-// (unterminated string, open braces, dangling comma/colon); anything still
-// invalid after closing degrades to "{}".
+// (unterminated string, open braces, dangling comma/colon); anything stillinvalid after closing degrades to
+// "{}".
 func closeTruncatedJSON(s string) string {
 	var stack []byte
 	inStr, esc := false, false
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if inStr {
 			switch {
@@ -555,8 +546,8 @@ func closeTruncatedJSON(s string) string {
 	case strings.HasSuffix(trimmed, ":"):
 		out = trimmed + "null"
 	}
-	for i := len(stack) - 1; i >= 0; i-- {
-		out += string(stack[i])
+	for _, v := range slices.Backward(stack) {
+		out += string(v)
 	}
 	if !json.Valid([]byte(out)) {
 		return "{}"
@@ -564,12 +555,11 @@ func closeTruncatedJSON(s string) string {
 	return out
 }
 
-// pairToolResults answers each tool_call with its result, backfilling a
-// placeholder for any unanswered one. Distinct non-empty ids pair by id (so
-// reordered results re-sort to call order); empty or duplicate ids pair by
-// position instead — some gateways stream tool calls by index with no id, and a
-// map keyed on id would collapse those results into one (call order is preserved
-// because the loop appends results in call order).
+// pairToolResults answers each tool_call with its result, backfilling aplaceholder for any unanswered one.
+// Distinct non-empty ids pair by id (soreordered results re-sort to call order);
+// emptyorduplicateidspairbyposition instead — some gatewaysstream tool calls by index with no id,
+// andamapkeyed on id would collapse those results into one
+// (callorder is preservedbecause the loop appendsresults in call order).
 func pairToolResults(calls []ToolCall, avail []Message) []Message {
 	out := make([]Message, 0, len(calls))
 	if idDistinct(calls) {
@@ -600,10 +590,9 @@ func pairToolResults(calls []ToolCall, avail []Message) []Message {
 	return out
 }
 
-// sessionToolResults preserves every stored tool result and appends placeholders
-// only for calls that have no recorded answer. Load-time normalization must not
-// drop or reorder user history; provider sends can still use pairToolResults for
-// strict wire formatting.
+// sessionToolResultspreserveseverystoredtoolresultandappendsplaceholdersonlyforcallsthathavenorecordedanswer.
+// Load-timenormalizationmustnotdrop or reorder user history;
+// providersendscanstillusepairToolResultsforstrictwireformatting.
 func sessionToolResults(calls []ToolCall, avail []Message) []Message {
 	out := append([]Message(nil), avail...)
 	if idDistinct(calls) {
@@ -625,11 +614,11 @@ func sessionToolResults(calls []ToolCall, avail []Message) []Message {
 	return out
 }
 
-// backfillToolCallNames returns calls with any empty Name filled in from the
-// matching tool result (by id, then by position). Old sessions (#4727) may have
-// saved assistant tool-calls with an empty name; backfilling gives the model
-// useful context during replay. The common case (no empty names) returns the
-// input unchanged without allocating. Unpaired calls keep their empty name,
+// backfillToolCallNames returns calls with any empty Name filled in from thematching tool result (by id,
+// then by position). Old sessions (#4727) may havesaved assistant tool-calls with an empty name;
+// backfillinggives the modeluseful context during replay.
+// The common case (no empty names) returns theinput unchanged without allocating.
+// Unpairedcallskeeptheirempty name,
 // which the wire-format fix (openai.go) handles gracefully.
 func backfillToolCallNames(calls []ToolCall, results []Message) []ToolCall {
 	missing := false
@@ -669,8 +658,8 @@ func backfillToolCallNames(calls []ToolCall, results []Message) []ToolCall {
 	return out
 }
 
-// idDistinct reports whether every call carries a non-empty id unique within the
-// batch — the condition under which id-keyed pairing is safe.
+// idDistinct reports whether every call carries a non-empty id unique within thebatch —
+// theconditionunderwhich id-keyed pairing is safe.
 func idDistinct(calls []ToolCall) bool {
 	seen := make(map[string]struct{}, len(calls))
 	for _, tc := range calls {
@@ -698,17 +687,19 @@ const (
 	ChunkDone                               // completion finished normally
 	ChunkError                              // an error occurred
 	ChunkResponsesItem                      // a complete provider-issued Responses API output item for stateless replay
+	ChunkServerSearch                       // provider-executed web_search; not a client tool call
 )
 
-// Usage reports token accounting for a completion. Cache hit/miss come from
-// either DeepSeek's top-level prompt_cache_{hit,miss}_tokens or the OpenAI/MiMo
-// standard prompt_tokens_details.cached_tokens — the openai provider normalises
-// both shapes into these fields. ReasoningTokens is the thinking-mode subset of
-// CompletionTokens reported by thinking-capable models. FinishReason carries
-// the model's last reported choices[0].finish_reason so the agent can surface
-// abnormal terminations ("length", "content_filter", "repetition_truncation").
-// Estimated marks counts reconstructed locally because the provider's terminal
-// usage record did not arrive; exact provider usage leaves it false.
+// Usage reports token accounting for a completion. Cache hit/miss come fromeither
+// DeepSeek'stop-levelprompt_cache_{hit,miss}_tokens or the
+// OpenAI/MiMostandardprompt_tokens_details.cached_tokens —
+// theopenaiprovidernormalisesbothshapesintothesefields.
+// ReasoningTokens is the thinking-mode subset of
+// CompletionTokens reported by thinking-capable models.
+// FinishReasoncarriesthemodel'slastreportedchoices[0].finish_reason sotheagentcansurfaceabnormalterminations
+// ("length", "content_filter", "repetition_truncation").
+// Estimated marks counts reconstructed locally because the provider's terminalusage record did not arrive;
+// exact provider usage leaves it false.
 type Usage struct {
 	PromptTokens           int
 	CompletionTokens       int
@@ -720,14 +711,12 @@ type Usage struct {
 	ReasoningTokens        int     // subset of CompletionTokens spent on chain-of-thought
 	FinishReason           string  // "stop", "tool_calls", "length", "content_filter", "repetition_truncation", …
 	Estimated              bool
-	// RequestCount is the number of provider requests represented by this
-	// aggregate. Zero means one request for backward compatibility. Recovery
-	// paths that merge multiple attempts set the exact count.
+	// RequestCount is the number of provider requests represented by thisaggregate.
+	// Zeromeansonerequestforbackward compatibility. Recoverypaths that merge multiple attempts settheexactcount.
 	RequestCount int
-	// Context* fields describe the latest single-request shape for context
-	// gauges and rebind telemetry. When zero, consumers fall back to the
-	// billable Prompt/Completion/… fields. Multi-attempt sampling recovery
-	// sets PromptTokens (etc.) to the billable aggregate and fills Context*
+	// Context* fields describe the latest single-request shape for contextgauges and rebind telemetry. Whenzero,
+	// consumers fall back to thebillable Prompt/Completion/… fields. Multi-attempt sampling recoverysets
+	// PromptTokens (etc.) tothebillable aggregate and fills Context*
 	// from the final attempt only.
 	ContextPromptTokens     int
 	ContextCompletionTokens int
@@ -736,22 +725,14 @@ type Usage struct {
 	ContextCacheMissTokens  int
 }
 
-// ContextFillTokens returns the latest-attempt context fill (prompt+completion)
-// used by status bars and context panels. Falls back to billable totals when
-// no Context* fields were set (single-attempt / legacy usage events).
+// ContextFillTokens returns the latest prompt occupancy used by context gauges.
 func (u *Usage) ContextFillTokens() int {
-	if u == nil {
-		return 0
-	}
-	if u.ContextPromptTokens > 0 || u.ContextCompletionTokens > 0 {
-		return u.ContextPromptTokens + u.ContextCompletionTokens
-	}
-	return u.PromptTokens + u.CompletionTokens
+	return u.LatestPromptTokens()
 }
 
-// ContextPromptForGauge returns the latest-attempt prompt size for context
-// displays. Falls back to PromptTokens when ContextPromptTokens is unset.
-func (u *Usage) ContextPromptForGauge() int {
+// LatestPromptTokens returns the latest-attempt prompt size for context-awareruntime decisions. Falls backto
+// PromptTokens for single-attempt legacy usage.
+func (u *Usage) LatestPromptTokens() int {
 	if u == nil {
 		return 0
 	}
@@ -761,8 +742,8 @@ func (u *Usage) ContextPromptForGauge() int {
 	return u.PromptTokens
 }
 
-// Pricing is a provider's per-1M-token rates, used to estimate spend. Currency
-// is a display symbol or ISO-like code (default "¥"). toml tags let config decode it.
+// Pricing is a provider's per-1M-token rates, used to estimate spend. Currencyis a display symbol or
+// ISO-like code (default "¥"). toml tags let config decode it.
 type Pricing struct {
 	CacheHit float64 `toml:"cache_hit"` // per 1M cached prompt tokens
 	Input    float64 `toml:"input"`     // per 1M uncached prompt tokens
@@ -770,11 +751,13 @@ type Pricing struct {
 	Currency string  `toml:"currency"`
 }
 
-// Cost estimates the spend for a usage record.
+// Cost estimates the spend for a usage record. Compatibility adapter only —
+// new host code must consume billing.CostQuote instead of aggregating floats.
 func (p *Pricing) Cost(u *Usage) float64 {
 	if p == nil || u == nil {
 		return 0
 	}
+	// Keepthehistoricalfloatpathbyte-stableforteststhatassertexactfloatresultswithoutgoingthroughthefixed-pointquotelayer.
 	hit := u.CacheHitTokens
 	miss := u.CacheMissTokens
 	if hit+miss == 0 && u.PromptTokens > 0 {
@@ -782,20 +765,12 @@ func (p *Pricing) Cost(u *Usage) float64 {
 	} else if miss == 0 && hit > 0 && u.PromptTokens > hit {
 		miss = u.PromptTokens - hit
 	}
-	// CacheMissTokens intentionally remains the raw prompt-token denominator
-	// used by cache hit-rate displays, so cache writes are included there. For
-	// cost, split those writes back out and replace them with their provider-
-	// supplied input-token equivalent (for example Anthropic's 1.25x 5-minute
-	// writes or 2x 1-hour writes). Older providers leave both fields at zero and
-	// keep the legacy one-input-rate behavior. A write count without billed
-	// units also falls back to 1x for backward compatibility.
-	write := u.CacheWriteTokens
-	if write < 0 {
-		write = 0
-	}
-	if write > miss {
-		write = miss
-	}
+	// CacheMissTokens intentionally remains the raw prompt-token denominatorused by cache hit-rate displays,
+	// socache writes are included there. Forcost, split those writes back out and replace themwiththeirprovider-
+	// supplied input-token equivalent (for example Anthropic's 1.25x 5-minutewrites or 2x 1-hour writes).
+	// Olderproviders leave both fields at zero andkeep the legacy one-input-rate behavior.
+	// Awritecountwithoutbilledunits also falls back to 1xforbackward compatibility.
+	write := min(max(u.CacheWriteTokens, 0), miss)
 	billedWrite := 0.0
 	if write > 0 {
 		billedWrite = u.CacheWriteBilledTokens
@@ -870,34 +845,34 @@ type Chunk struct {
 	Text      string // ChunkText, ChunkReasoning
 	Signature string // ChunkReasoning: opaque proof for the reasoning (Anthropic thinking signature), when issued
 	// ReasoningID/ReasoningStatus ride the final ChunkReasoning of a turn
-	// (empty Text): the provider-issued reasoning item id/status captured
-	// from the SSE stream, so the Agent can persist them into the session
-	// and the next turn's input reasoning item round-trips them (review
+	// (empty Text): the provider-issued reasoning item id/status capturedfrom the SSE stream, so the
+	// Agentcanpersist them into the sessionand the next turn's input reasoning item round-trips them (review
 	// #7234 — OpenAI Responses schema marks Reasoning.id required).
-	ReasoningID     string          // ChunkReasoning: provider-issued reasoning item id
-	ReasoningStatus string          // ChunkReasoning: final reasoning item status ("completed")
-	ToolCall        *ToolCall       // ChunkToolCallStart (ID+Name only), ChunkToolCallArgsDelta (ID+Name), ChunkToolCall (complete)
-	ArgChars        int             // ChunkToolCallArgsDelta: cumulative argument characters received for this call
-	ResponsesItem   json.RawMessage // ChunkResponsesItem: opaque validated Responses API output item
-	Usage           *Usage          // ChunkUsage
-	Err             error           // ChunkError
+	ReasoningID     string            // ChunkReasoning: provider-issued reasoning item id
+	ReasoningStatus string            // ChunkReasoning: final reasoning item status ("completed")
+	ToolCall        *ToolCall         // ChunkToolCallStart (ID+Name only), ChunkToolCallArgsDelta (ID+Name), ChunkToolCall (complete)
+	ArgChars        int               // ChunkToolCallArgsDelta: cumulative argument characters received for this call
+	ResponsesItem   json.RawMessage   // ChunkResponsesItem: opaque validated Responses API output item
+	ServerSearch    *ServerSearchCall // ChunkServerSearch: display card + replay payload
+	Usage           *Usage            // ChunkUsage
+	Err             error             // ChunkError
 }
 
-// Fixed stream-interrupt reasons for observability. Values are a closed enum
-// and must never carry URLs, tool arguments, file paths, or raw error text.
+// Fixed stream-interrupt reasons for observability. Values are a closed enumand must never carry URLs,
+// toolarguments, file paths, or raw error text.
 const (
 	StreamInterruptConnectionReset = "connection_reset"
 	StreamInterruptPrematureEOF    = "premature_eof"
 	StreamInterruptIdleTimeout     = "idle_timeout"
 )
 
-// StreamInterruptedError marks that the current sampling attempt never reached
-// a clean provider terminal event and is therefore uncommitted. The Agent may
-// replay the exact same provider request. Providers must not perform body-phase
-// request replay themselves — that lives at the Agent layer so retry budgets,
+// StreamInterruptedErrormarksthatthecurrentsamplingattemptneverreachedacleanproviderterminaleventandisthereforeuncommitted.
+// The
+// Agentmayreplay the exact same provider request. Providers must notperformbody-phaserequestreplaythemselves
+// —
+// that lives at the Agent layer so retry budgets,
 // UI rollback, and tool execution stay single-owner. context.Canceled, auth,
-// 4xx/schema errors, and unparseable complete protocol payloads must not use
-// this type.
+// 4xx/schema errors, and unparseable complete protocol payloads must not usethis type.
 type StreamInterruptedError struct {
 	Err    error
 	Reason string // one of the StreamInterrupt* constants; may be empty for older callers
@@ -925,8 +900,7 @@ func StreamInterrupt(err error, reason string) error {
 	return &StreamInterruptedError{Err: err, Reason: reason}
 }
 
-// StreamInterruptReason returns the fixed reason when err is a stream
-// interruption, or empty otherwise.
+// StreamInterruptReason returns the fixed reason when err is a streaminterruption, or empty otherwise.
 func StreamInterruptReason(err error) string {
 	var interrupted *StreamInterruptedError
 	if !errors.As(err, &interrupted) || interrupted == nil {
@@ -971,25 +945,21 @@ type Provider interface {
 	// Name returns the provider instance name, e.g. "deepseek" / "mimo".
 	Name() string
 	// Stream starts a streaming completion, pushing increments on the channel.
-	// Cancelling ctx must abort the underlying request; a closed channel marks
-	// the end of the completion.
+	// Cancelling ctx must abort the underlying request; a closed channel marksthe end of the completion.
 	Stream(ctx context.Context, req Request) (<-chan Chunk, error)
 }
 
-// ToolCallReasoningPolicy is optionally implemented by providers whose protocol
-// replays the provider-issued reasoning block on assistant tool_calls turns
-// (DeepSeek thinking mode). The agent uses it to archive the original reasoning
-// text on those turns (a display-translated copy must not round-trip to the
-// API) and to warn when a turn arrives with none — the request still succeeds
-// because the wire layer always emits the reasoning_content key for such turns,
-// but the model loses its chain-of-thought context. Most providers leave this
-// unset; callers must treat it as false.
+// ToolCallReasoningPolicyisoptionallyimplementedbyproviderswhoseprotocolreplaystheprovider-issuedreasoningblockonassistanttool_callsturns
+// (DeepSeek thinking mode). The agent uses it to archive the original reasoningtext on those turns
+// (adisplay-translated copy must not round-trip to the
+// API) and to detect turns that arrive with none.
+// Whetheranexplicitemptyvalueisavalidfinalfallbackisaseparate protocol capability.
+// Mostprovidersleavethisunset; callers must treat it as false.
 type ToolCallReasoningPolicy interface {
 	RequiresToolCallReasoning() bool
 }
 
-// RequiresToolCallReasoning reports whether p replays reasoning_content on
-// assistant tool_calls turns sent back in history.
+// RequiresToolCallReasoningreportswhetherpreplaysreasoning_contentonassistanttool_callsturnssentbackinhistory.
 func RequiresToolCallReasoning(p Provider) bool {
 	if nilutil.IsNil(p) {
 		return false
@@ -998,16 +968,13 @@ func RequiresToolCallReasoning(p Provider) bool {
 	return ok && policy.RequiresToolCallReasoning()
 }
 
-// ReasoningRoundTripPolicy is optionally implemented by providers that require
-// every assistant message to preserve provider-issued reasoning in later
-// requests. This is broader than ToolCallReasoningPolicy, which covers only
-// assistant tool_calls turns.
+// ReasoningRoundTripPolicyisoptionallyimplementedbyprovidersthatrequireeveryassistantmessagetopreserveprovider-issuedreasoninginlaterrequests.
+// This is broader than ToolCallReasoningPolicy, which covers onlyassistant tool_calls turns.
 type ReasoningRoundTripPolicy interface {
 	RequiresReasoningRoundTrip() bool
 }
 
-// RequiresReasoningRoundTrip reports whether raw provider reasoning must be
-// retained and replayed on all assistant messages.
+// RequiresReasoningRoundTripreportswhetherrawproviderreasoningmustberetainedandreplayedonallassistantmessages.
 func RequiresReasoningRoundTrip(p Provider) bool {
 	if nilutil.IsNil(p) {
 		return false
@@ -1016,28 +983,24 @@ func RequiresReasoningRoundTrip(p Provider) bool {
 	return ok && policy.RequiresReasoningRoundTrip()
 }
 
-// MissingToolCallReasoningWarningPolicy is optionally implemented by providers
-// whose replay protocol requires reasoning_content, but whose active model may
-// not reliably emit it. The legacy Warning name is retained for source
-// compatibility; the agent now uses this policy for silent bounded recovery and
-// emits no user-visible protocol notice.
+// MissingToolCallReasoningWarningPolicyisoptionallyimplementedbyproviderswhosereplayprotocolrequiresreasoning_content,
+// but whose active model maynot reliably emit it. The legacy Warning name is retainedforsourcecompatibility;
+// theagentnowusesthispolicy for silent bounded recovery andemits no user-visible protocol notice.
 type MissingToolCallReasoningWarningPolicy interface {
 	WarnOnMissingToolCallReasoning() bool
 }
 
 // MissingToolCallReasoningWarningIdentityPolicy optionally supplies the stable,
-// non-credential configuration identity used to rate-limit missing-reasoning
-// recovery attempts. The legacy name preserves adapters and persisted state.
-// Implementations may include adapter kind, endpoint, model, and thinking
-// controls; the raw identity never leaves memory and is hashed before
-// persistence.
+// non-credential configuration identity used to rate-limit missing-reasoningrecovery attempts.
+// Thelegacynamepreserves adapters and persisted state.
+// Implementations may include adapter kind, endpoint, model, and thinkingcontrols;
+// therawidentityneverleavesmemory and is hashed beforepersistence.
 type MissingToolCallReasoningWarningIdentityPolicy interface {
 	MissingToolCallReasoningWarningIdentity() string
 }
 
-// WarnOnMissingToolCallReasoning reports whether a tool_calls turn with empty
-// reasoning_content should enter silent recovery. Its legacy name is preserved
-// for provider implementations compiled against the original diagnostic API.
+// WarnOnMissingToolCallReasoningreportswhetheratool_callsturnwithemptyreasoning_contentshouldentersilentrecovery.
+// Its legacy name ispreservedfor provider implementations compiled against the original diagnostic API.
 func WarnOnMissingToolCallReasoning(p Provider) bool {
 	if nilutil.IsNil(p) {
 		return false
@@ -1049,12 +1012,11 @@ func WarnOnMissingToolCallReasoning(p Provider) bool {
 	return RequiresToolCallReasoning(p)
 }
 
-// MissingToolCallReasoningWarningFingerprint returns an opaque stable key for
-// one provider configuration's recovery cooldown. Concrete adapters distinguish
-// endpoint/model/protocol changes; providers without the optional policy retain
-// a safe type-and-name fallback. The legacy name preserves the on-disk state
-// contract. The digest prevents local state from exposing raw endpoints or
-// model identifiers.
+// MissingToolCallReasoningWarningFingerprintreturnsanopaquestablekeyforoneproviderconfiguration'srecoverycooldown.
+// Concrete adapters distinguishendpoint/model/protocol changes;
+// providerswithouttheoptionalpolicyretainasafetype-and-namefallback.
+// The legacy name preserves the on-disk statecontract.
+// Thedigestpreventslocalstatefromexposingrawendpointsormodel identifiers.
 func MissingToolCallReasoningWarningFingerprint(p Provider) string {
 	if nilutil.IsNil(p) {
 		return ""
@@ -1076,18 +1038,20 @@ type Config struct {
 	Model   string         // model id
 	APIKey  string         // resolved from api_key_env
 	Extra   map[string]any // kind-specific options
+	// ModelInfo is adapter-owned metadata for the exact model instance. It is
+	// optional so existing third-party factories remain source-compatible.
+	ModelInfo *ModelInfo
 }
 
-// AuthError reports that a provider rejected the API key (HTTP 401/403). Its
-// message is already user-facing and actionable — it names the provider and,
-// when known, the environment variable the key comes from — and it carries the
-// server's own reason as Body, because relay gateways explain *why* the key was
-// rejected ("token expired", key not entitled to the model) in the response
-// body. Body is deliberately NOT part of Error(): servers echo masked key
-// fragments in auth bodies, and the ambient error string flows into logs,
-// status lines, and traces where key material must never propagate. Display
-// layers that want the reason read Body and extract it themselves. Providers
-// should return this (rather than a generic status error) for auth failures.
+// AuthError reports that a provider rejected the API key (HTTP 401/403).
+// Itsmessageisalreadyuser-facingandactionable — it names the provider and,
+// when known, the environment variable the key comes from — and it carries theserver's own reason as Body,
+// because relay gateways explain *why* the key wasrejected ("token expired", key not entitled to the model)
+// in the responsebody. Body is deliberately NOTpart of Error(): servers echo maskedkeyfragmentsinauthbodies,
+// and the ambient error string flows intologs,
+// status lines, and traces where key material must never propagate. Displaylayers that want the reason read
+// Body and extract it themselves. Providersshould return this (rather than a generic status error)
+// forauthfailures.
 type AuthError struct {
 	Provider  string // the provider instance name, e.g. "deepseek"
 	KeyEnv    string // the api_key_env the key is read from, when known

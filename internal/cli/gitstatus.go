@@ -72,10 +72,10 @@ func loadGitStatus(ctx context.Context, cwd string) (gitStatus, error) {
 }
 
 func runGit(ctx context.Context, cwd string, args ...string) (string, error) {
-	cmd := gitcmd.Command(ctx, "", args...)
-	if cwd != "" {
-		cmd.Dir = cwd
-	}
+	// cwd goes through gitcmd's dir parameter, not cmd.Dir, so the gitcmd
+	// baseline can resolve the repository's own config relative to it (the
+	// filter-driver neutralization reads <cwd>/.git/config).
+	cmd := gitcmd.Command(ctx, cwd, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -84,7 +84,7 @@ func runGit(ctx context.Context, cwd string, args ...string) (string, error) {
 }
 
 func parseGitNumstat(out string) (added int, removed int) {
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 		if line == "" {
 			continue
 		}
@@ -108,7 +108,7 @@ func parseGitNumstat(out string) (added int, removed int) {
 
 func countUntracked(out string) int {
 	n := 0
-	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(out, "\n"), "\n") {
 		if strings.HasPrefix(line, "?? ") {
 			n++
 		}

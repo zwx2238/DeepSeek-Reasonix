@@ -300,10 +300,23 @@ ok(styleProps.get("--theme-pane-task-card-pct") === "82%", "computes task card p
 ok(styleProps.get("--theme-pane-session-hover-pct") === "76%", "computes home session-hover opacity tier");
 ok(styleProps.get("--theme-pane-child-pct") === "80%", "computes home child opacity tier");
 ok(styleProps.get("--theme-pane-interact-pct") === "90%", "computes home interaction opacity tier");
+ok(styleProps.get("--theme-pane-overlay-pct") === "90%", "computes home operational overlay opacity tier");
 ok(styleProps.get("--theme-pane-task-session-hover-pct") === "94%", "computes task session-hover opacity tier");
 ok(styleProps.get("--theme-pane-task-child-pct") === "98%", "computes task child opacity tier");
 ok(styleProps.get("--theme-pane-task-interact-pct") === "100%", "caps task interaction opacity tier");
+ok(styleProps.get("--theme-pane-task-overlay-pct") === "100%", "caps task operational overlay opacity tier");
 ok(attrs.get("data-theme-safe-area") === "right", "task background controls safe area");
+
+for (const [paneOpacity, expected] of [[0, "40%"], [0.5, "90%"], [1, "100%"]] as const) {
+  const opacityDraft = draftPackView({
+    ...twoSceneDraft,
+    background: { ...twoSceneDraft.background!, paneOpacity },
+    taskBackground: { ...twoSceneDraft.taskBackground!, paneOpacity },
+  });
+  applyThemePack(opacityDraft);
+  ok(styleProps.get("--theme-pane-overlay-pct") === expected, `home overlay follows pane opacity ${paneOpacity}`);
+  ok(styleProps.get("--theme-pane-task-overlay-pct") === expected, `task overlay follows pane opacity ${paneOpacity}`);
+}
 
 // Older shells and partial mocks can expose the independent task scene without
 // the newly added paneOpacity field. It must inherit the home pane value rather
@@ -329,12 +342,19 @@ ok(
     "--theme-pane-session-hover-pct",
     "--theme-pane-child-pct",
     "--theme-pane-interact-pct",
+    "--theme-pane-overlay-pct",
     "--theme-pane-task-session-hover-pct",
     "--theme-pane-task-child-pct",
     "--theme-pane-task-interact-pct",
+    "--theme-pane-task-overlay-pct",
   ].every((property) => !styleProps.has(property)),
   "clearing a pack removes every extended pane opacity tier",
 );
+applyThemePack(tokenOnlyPreview);
+ok(!attrs.has("data-theme-has-bg"), "token-only themes keep operational overlays on the opaque base surface");
+ok(!styleProps.has("--theme-pane-overlay-pct"), "token-only themes do not inject home overlay transparency");
+ok(!styleProps.has("--theme-pane-task-overlay-pct"), "token-only themes do not inject task overlay transparency");
+clearThemePack();
 ok(styleText("reasonix-base-code-readability").includes("--code-add-bg:"), "applyTheme installs the base code readability stylesheet");
 beginThemePreview(draft);
 ok(attrs.get("data-theme-pack") === "preview-pack", "preview applies pack");
@@ -531,6 +551,26 @@ ok(overviewSource.includes("appearance-overview__segmented--theme"), "theme-mode
 ok(overviewSource.includes("appearance-overview__segmented--text-size"), "text-size control uses its wider compact settings width");
 ok(stylesSource.includes("--appearance-segmented-width: 300px") && stylesSource.includes("--appearance-segmented-width: 420px"), "overview segmented controls use intentional widths");
 ok(stylesSource.includes(".appearance-overview__segmented { justify-self: stretch; width: 100%; }"), "overview segmented controls expand on narrow screens");
+const creationCardSwatchRule =
+  stylesSource.match(/:root\[data-theme-style\] \.app--creation \.theme-card \.theme-card__swatches \{([^}]*)\}/)?.[1] ?? "";
+const creationHeroRule =
+  stylesSource.match(/:root\[data-theme-style\] \.app--creation \.appearance-overview__thumb-base\.theme-card__swatches \{([^}]*)\}/)?.[1] ?? "";
+const creationHeroSwatchRule =
+  stylesSource.match(/:root\[data-theme-style\] \.app--creation \.appearance-overview__thumb-base \.theme-card__swatch \{([^}]*)\}/)?.[1] ?? "";
+const creationGraphiteAccentRule =
+  stylesSource.match(/:root\[data-theme-style\] \.app--creation \.theme-card__swatches\[data-theme-style-card="graphite"\] \.theme-card__swatch--accent \{([^}]*)\}/)?.[1] ?? "";
+ok(
+  creationCardSwatchRule.includes("height: 7px") && !/^\.app--creation \.theme-card__swatches,$/m.test(stylesSource),
+  "Creation compact swatches stay scoped to real theme cards",
+);
+ok(
+  creationHeroRule.includes("min-height: 108px") && creationHeroSwatchRule.includes("flex: 1"),
+  "Creation appearance hero keeps readable swatch dimensions",
+);
+ok(
+  creationGraphiteAccentRule.includes("linear-gradient(128deg, #604116") && creationGraphiteAccentRule.includes("#f3d77b"),
+  "Creation Graphite appearance hero keeps the gold accent palette",
+);
 ok(
   overviewSource.includes('fontFamily === "custom"') && overviewSource.includes("onCustomFontNameChange(e.target.value)"),
   "custom UI font selection exposes an editable font name",

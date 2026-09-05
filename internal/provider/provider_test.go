@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// --- SanitizeToolPairing ---
+// SanitizeToolPairing
 
 // toolIDsAnswered reports whether every assistant tool_call id has a following
 // tool message answering it — the contract the OpenAI/DeepSeek API enforces.
@@ -108,6 +108,9 @@ func TestModelMessagesAndSanitizeDropLocalOnlyInterruptedOutput(t *testing.T) {
 		Content: "partial answer", ReasoningContent: "partial reasoning", LocalOnly: true,
 		ToolCalls:       []ToolCall{{ID: "partial", Name: "write_file"}},
 		InterruptedTurn: &InterruptedTurnRecovery{Pending: true, InterruptedTools: []string{"write_file"}},
+		FinalReadinessRecovery: &FinalReadinessRecovery{
+			Pending: true, Missing: []string{"verification"}, Checkpoint: json.RawMessage(`{"receipts":[]}`),
+		},
 	}
 	in := []Message{
 		{Role: RoleUser, Content: "task"},
@@ -123,7 +126,7 @@ func TestModelMessagesAndSanitizeDropLocalOnlyInterruptedOutput(t *testing.T) {
 		t.Fatalf("SanitizeToolPairing leaked local-only record: %+v", wire)
 	}
 	session := NormalizeSessionMessages(in)
-	if len(session) != len(in) || !session[1].LocalOnly || session[1].Content != local.Content {
+	if len(session) != len(in) || !session[1].LocalOnly || session[1].Content != local.Content || session[1].FinalReadinessRecovery == nil {
 		t.Fatalf("session normalization did not preserve local display: %+v", session)
 	}
 }
@@ -218,6 +221,24 @@ func TestModelMessagesUsesProviderContentWithoutMutatingStoredMessage(t *testing
 	}
 }
 
+func TestModelMessagesStripsVisionSummaryMetadataButKeepsSummaryContent(t *testing.T) {
+	stored := []Message{{
+		Role:    RoleUser,
+		Content: "question\n\n<reasonix-image-context>chart</reasonix-image-context>",
+		VisionSummary: &VisionSummary{
+			Version: 1, PromptVersion: "image-summary-v1", ModelRef: "vision/model",
+			ImageDigests: []string{"digest"}, Summary: "chart",
+		},
+	}}
+	model := ModelMessages(stored)
+	if len(model) != 1 || model[0].VisionSummary != nil || model[0].Content != stored[0].Content {
+		t.Fatalf("provider projection = %+v", model)
+	}
+	if stored[0].VisionSummary == nil {
+		t.Fatal("provider projection mutated stored metadata")
+	}
+}
+
 func TestModelMessagesStripsRawContentWithoutChangingLegacyContent(t *testing.T) {
 	const rendered = "<reasoning-language>zh</reasoning-language>\n\nfix the bug"
 	stored := []Message{{Role: RoleUser, Content: rendered, RawContent: "fix the bug"}}
@@ -231,6 +252,40 @@ func TestModelMessagesStripsRawContentWithoutChangingLegacyContent(t *testing.T)
 	}
 	if stored[0].RawContent != "fix the bug" || stored[0].Content != rendered {
 		t.Fatalf("stored message was mutated: %+v", stored[0])
+	}
+}
+
+// A stored projection is read twice: as what the model is sent, and as the input
+// the next compaction classifies. Only ToolExecution says a tool call failed, so
+// the strip has to happen at the provider boundary rather than at write time.
+func TestProjectionMessagesKeepsExecutionThatModelMessagesStrips(t *testing.T) {
+	exit := 1
+	stored := []Message{
+		{Role: RoleUser, Content: "task"},
+		{Role: RoleTool, ToolCallID: "c1", Name: "bash", Content: "=== RUN\n--- FAIL: TestX",
+			RawContent: "the whole log", ToolExecution: &ToolExecution{ExitCode: &exit}},
+		{Role: RoleTool, ToolCallID: "local", Name: "x", Content: "display only", LocalOnly: true},
+	}
+
+	proj := ProjectionMessages(stored)
+	if len(proj) != 2 {
+		t.Fatalf("projection kept display-only output: %+v", proj)
+	}
+	if proj[1].ToolExecution == nil {
+		t.Fatal("projection dropped the failure record the next compaction classifies on")
+	}
+	if proj[1].RawContent != "" {
+		t.Fatalf("projection kept unbounded raw content: %+v", proj[1])
+	}
+
+	// The same messages, once they are actually going to a provider.
+	for i, m := range ModelMessages(proj) {
+		if m.ToolExecution != nil {
+			t.Fatalf("local shell metadata reached the wire at index %d: %+v", i, m)
+		}
+	}
+	if stored[1].ToolExecution == nil {
+		t.Fatal("stored message was mutated")
 	}
 }
 
@@ -391,7 +446,7 @@ func TestSanitizeToolPairingBackfillsMissingToolResultName(t *testing.T) {
 	}
 }
 
-// --- Pricing.Cost ---
+// Pricing.Cost
 
 func TestPricingCostNil(t *testing.T) {
 	var p *Pricing
@@ -477,7 +532,7 @@ func TestPricingCostZeroTokens(t *testing.T) {
 	}
 }
 
-// --- Pricing.Symbol ---
+// Pricing.Symbol
 
 func TestPricingSymbolDefault(t *testing.T) {
 	p := &Pricing{}
@@ -524,7 +579,7 @@ func TestPricingSymbolNormalizesCurrencyCodes(t *testing.T) {
 	}
 }
 
-// --- AuthError ---
+// AuthError
 
 func TestAuthErrorWithKeyEnv(t *testing.T) {
 	e := &AuthError{Provider: "deepseek", KeyEnv: "DEEPSEEK_API_KEY", Status: 401}
@@ -567,7 +622,7 @@ func TestAuthErrorImplementsError(t *testing.T) {
 	}
 }
 
-// --- Registry ---
+// Registry
 
 func TestRegistryKindsSorted(t *testing.T) {
 	// The openai package self-registers via init(); we can't control that here
@@ -615,7 +670,7 @@ func TestNewRejectsTypedNilProvider(t *testing.T) {
 	}
 }
 
-// --- Role constants ---
+// Role constants
 
 func TestRoleConstants(t *testing.T) {
 	if RoleSystem != "system" {
@@ -663,10 +718,33 @@ func TestMessageResponsesItemsRemainBackwardCompatible(t *testing.T) {
 	}
 }
 
-// --- ChunkType constants ---
+func TestMessageServerSearchRemainBackwardCompatible(t *testing.T) {
+	legacy := Message{Role: RoleAssistant, Content: "answer"}
+	legacyJSON, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(legacyJSON), "server_search") {
+		t.Fatalf("legacy message gained server_search: %s", legacyJSON)
+	}
+	current := Message{Role: RoleAssistant, Content: "answer", ServerSearch: []ServerSearchCall{{ID: "s1", Query: "q"}}}
+	raw, err := json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTrip Message
+	if err := json.Unmarshal(raw, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if len(roundTrip.ServerSearch) != 1 || roundTrip.ServerSearch[0].ID != "s1" || roundTrip.ServerSearch[0].Query != "q" {
+		t.Fatalf("round-tripped ServerSearch = %#v", roundTrip.ServerSearch)
+	}
+}
+
+// ChunkType constants
 
 func TestChunkTypeConstants(t *testing.T) {
-	types := []ChunkType{ChunkText, ChunkReasoning, ChunkToolCallStart, ChunkToolCallArgsDelta, ChunkToolCall, ChunkUsage, ChunkDone, ChunkError, ChunkResponsesItem}
+	types := []ChunkType{ChunkText, ChunkReasoning, ChunkToolCallStart, ChunkToolCallArgsDelta, ChunkToolCall, ChunkUsage, ChunkDone, ChunkError, ChunkResponsesItem, ChunkServerSearch}
 	for i, ct := range types {
 		if int(ct) != i {
 			t.Errorf("ChunkType %d: got %d", i, int(ct))
@@ -674,7 +752,7 @@ func TestChunkTypeConstants(t *testing.T) {
 	}
 }
 
-// --- ToolSchema ---
+// ToolSchema
 
 func TestToolSchemaJSON(t *testing.T) {
 	ts := ToolSchema{

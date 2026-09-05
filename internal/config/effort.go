@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"reasonix/internal/provider/openai"
@@ -11,6 +12,7 @@ const (
 	ReasoningProtocolAuto     = "auto"
 	ReasoningProtocolDeepSeek = "deepseek"
 	ReasoningProtocolGLM      = "glm"
+	ReasoningProtocolKimiK3   = "kimi-k3"
 	ReasoningProtocolOpenAI   = "openai"
 	ReasoningProtocolNone     = "none"
 )
@@ -35,17 +37,29 @@ var modelReasoningCapabilities = map[string]modelReasoningCapability{
 		Protocol: ReasoningProtocolDeepSeek,
 		Levels:   []string{"disabled", "low", "high", "max"},
 		Default:  "high",
-		Aliases:  map[string]string{"xhigh": "high"},
+		Aliases:  map[string]string{"medium": "high", "xhigh": "high"},
 	},
-	"deepseek-v4-pro": {Protocol: ReasoningProtocolDeepSeek, Levels: []string{"disabled", "high", "max"}, Default: "high"},
+	"deepseek-v4-pro": {
+		Protocol: ReasoningProtocolDeepSeek,
+		Levels:   []string{"disabled", "low", "high", "max"},
+		Default:  "high",
+		Aliases:  map[string]string{"medium": "high", "xhigh": "high"},
+	},
 }
 
 // EffortCapabilityForEntry returns the user-facing /effort levels for a resolved
 // provider entry. Provider implementations still decide how a stored effort is
 // serialized into requests.
 func EffortCapabilityForEntry(e *ProviderEntry) EffortCapability {
-	if explicitReasoningProtocol(e) == ReasoningProtocolNone {
+	explicitProtocol := explicitReasoningProtocol(e)
+	if explicitProtocol == ReasoningProtocolNone {
 		return EffortCapability{}
+	}
+	// Kimi K3 is a complete wire contract, including its fixed effort
+	// vocabulary. Keep any persisted supported_efforts metadata dormant while
+	// the protocol is selected so switching protocols can restore it later.
+	if explicitProtocol == ReasoningProtocolKimiK3 {
+		return kimiK3EffortCapability()
 	}
 	supported := normalizedSupportedEfforts(e)
 	if len(supported) > 0 {
@@ -58,7 +72,7 @@ func EffortCapabilityForEntry(e *ProviderEntry) EffortCapability {
 		}
 		return EffortCapability{Supported: true, Levels: levels, Default: def}
 	}
-	switch explicitReasoningProtocol(e) {
+	switch explicitProtocol {
 	case ReasoningProtocolDeepSeek:
 		if cap, ok := resolvedModelReasoningCapability(e); ok && cap.Protocol == ReasoningProtocolDeepSeek {
 			return effortCapabilityFromModel(cap)
@@ -84,6 +98,8 @@ func EffortCapabilityForEntry(e *ProviderEntry) EffortCapability {
 		return deepSeekEffortCapability()
 	case ReasoningProtocolGLM:
 		return glmEffortCapability()
+	case ReasoningProtocolKimiK3:
+		return kimiK3EffortCapability()
 	case ReasoningProtocolOpenAI:
 		return openAIEffortCapability()
 	}
@@ -129,18 +145,23 @@ func NormalizeEffort(e *ProviderEntry, raw string) (string, error) {
 	if level == "auto" {
 		return "", nil
 	}
-	if explicitReasoningProtocol(e) == ReasoningProtocolNone {
+	explicitProtocol := explicitReasoningProtocol(e)
+	if explicitProtocol == ReasoningProtocolNone {
 		return "", effortNotConfigurableError(e)
 	}
+	if explicitProtocol == ReasoningProtocolKimiK3 {
+		return normalizeKimiK3ReasoningEffort(level)
+	}
 	supported := normalizedSupportedEfforts(e)
+	level = normalizeBuiltInModelEffortAlias(e, supported, level)
 	if len(supported) > 0 {
 		if containsString(supported, level) {
 			return level, nil
 		}
 		return "", fmt.Errorf("usage: /effort auto|%s", strings.Join(supported, "|"))
 	}
-	// V4 Flash 0731 added a real low depth. Keep this model-scoped: Pro and
-	// generic DeepSeek-compatible endpoints still normalize low to high unless
+	// V4 Flash and Pro expose a real low depth. Keep this model-scoped: generic
+	// DeepSeek-compatible endpoints still normalize low to high unless
 	// they explicitly advertise a different supported_efforts list.
 	if cap, ok := resolvedModelReasoningCapability(e); ok {
 		explicit := explicitReasoningProtocol(e)
@@ -170,20 +191,9 @@ func NormalizeEffort(e *ProviderEntry, raw string) (string, error) {
 			return "", fmt.Errorf("usage: /effort auto|disabled|high|max")
 		}
 	case ReasoningProtocolOpenAI:
-		if isMimoEntry(e) {
-			switch level {
-			case "none", "low", "medium", "high":
-				return level, nil
-			default:
-				return "", fmt.Errorf("usage: /effort auto|none|low|medium|high")
-			}
-		}
-		switch level {
-		case "low", "medium", "high":
-			return level, nil
-		default:
-			return "", fmt.Errorf("usage: /effort auto|low|medium|high")
-		}
+		return normalizeOpenAIReasoningEffort(e, level)
+	case ReasoningProtocolKimiK3:
+		return normalizeKimiK3ReasoningEffort(level)
 	case ReasoningProtocolGLM:
 		return normalizeGLMEffort(level)
 	}
@@ -254,7 +264,11 @@ func EffortDisplay(e *ProviderEntry) string {
 	if e == nil || strings.TrimSpace(e.Effort) == "" {
 		return "auto"
 	}
-	return normalizeEffortLevel(e.Effort)
+	effort := normalizeEffortLevel(e.Effort)
+	if explicitReasoningProtocol(e) == ReasoningProtocolKimiK3 && !isKimiK3ReasoningEffort(effort) {
+		return "auto"
+	}
+	return effort
 }
 
 // EffectiveEffort resolves the provider-visible effort value. Explicit
@@ -266,7 +280,13 @@ func EffectiveEffort(e *ProviderEntry) string {
 		return ""
 	}
 	if effort := normalizeStoredEffort(e.Effort); effort != "" {
+		if explicitReasoningProtocol(e) == ReasoningProtocolKimiK3 && !isKimiK3ReasoningEffort(effort) {
+			return ""
+		}
 		return effort
+	}
+	if explicitReasoningProtocol(e) == ReasoningProtocolKimiK3 {
+		return ""
 	}
 	supported := normalizedSupportedEfforts(e)
 	if len(supported) == 0 {
@@ -342,11 +362,15 @@ func normalizeReasoningProtocol(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "", ReasoningProtocolAuto:
 		return ""
-	case ReasoningProtocolDeepSeek, ReasoningProtocolGLM, ReasoningProtocolOpenAI, ReasoningProtocolNone:
+	case ReasoningProtocolDeepSeek, ReasoningProtocolGLM, ReasoningProtocolKimiK3, ReasoningProtocolOpenAI, ReasoningProtocolNone:
 		return strings.ToLower(strings.TrimSpace(raw))
 	default:
 		return ""
 	}
+}
+
+func kimiK3EffortCapability() EffortCapability {
+	return EffortCapability{Supported: true, Levels: []string{"auto", "low", "high", "max"}, Default: "max"}
 }
 
 // isDeepSeekEntry reports whether the entry points at DeepSeek's API. The
@@ -425,8 +449,27 @@ func resolvedModelReasoningCapability(e *ProviderEntry) (modelReasoningCapabilit
 	if e == nil || e.Kind != "openai" {
 		return modelReasoningCapability{}, false
 	}
+	return modelReasoningCapabilityForEntry(e)
+}
+
+func modelReasoningCapabilityForEntry(e *ProviderEntry) (modelReasoningCapability, bool) {
+	if e == nil {
+		return modelReasoningCapability{}, false
+	}
 	cap, ok := modelReasoningCapabilities[strings.ToLower(strings.TrimSpace(e.Model))]
 	return cap, ok
+}
+
+func normalizeBuiltInModelEffortAlias(e *ProviderEntry, supported []string, level string) string {
+	cap, ok := modelReasoningCapabilityForEntry(e)
+	if !ok || !slices.Equal(supported, normalizedEffortLevels(cap.Levels)) {
+		return level
+	}
+	normalized, ok := cap.Aliases[level]
+	if !ok || !containsString(supported, normalized) {
+		return level
+	}
+	return normalized
 }
 
 func effortCapabilityFromModel(cap modelReasoningCapability) EffortCapability {
@@ -477,12 +520,7 @@ func effortNotConfigurableError(e *ProviderEntry) error {
 }
 
 func containsString(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(haystack, needle)
 }
 
 func normalizeEffortLevel(s string) string {

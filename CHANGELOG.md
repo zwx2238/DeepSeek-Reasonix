@@ -6,7 +6,171 @@ branch.
 
 ## Unreleased
 
+### Added
+
+- **MCP 2026-07-28 protocol:** multi-round-trip form/URL elicitation across
+  Desktop, CLI TUI, and serve; headless entries stay on the core surface and
+  cancel unanswered requests instead of guessing.
+- **MCP Apps 2026-01-26 (Desktop):** inline app surfaces in tool cards behind
+  a per-server double-iframe sandbox, app-tool visibility metadata, bounded
+  aggregate local presentations, tab-bound AppBridge routing and teardown,
+  immutable digest-bound resource snapshots, and confirmed external links;
+  local rich results, instance-gated app tool calls, and the four-layer
+  capability matrix in MCP status.
+- **Profile-scoped MCP schema caches:** capability-declaring hosts keep their
+  own `v3` cache files so catalogs negotiated under different client
+  capabilities never cross-read.
+
+### Changed
+
+- **Fact-driven execution:** Ordinary requests always enter the executor.
+  There is no automatic simple / light / full task mode and no per-turn
+  `TaskPolicy` classification. The planner runs only for an explicit Plan,
+  an approval boundary, or Goal start. The host builds verification
+  obligations from concrete tool effects and receipts. Plan, Goal,
+  permission, and sandbox stay independent. Tool schemas and the executor
+  system prefix stay byte-stable. Historical `<execution-policy>` tags remain
+  readable on old sessions and are stripped from new provider context.
+  Old `--preset`/`--profile` compatibility no-ops are unchanged.
+
+- **Remote connect wizard host picker:** Step 1's host field now opens the
+  saved SSH connections through an explicit chevron dropdown on the input's
+  right edge instead of the old focus-triggered popup. The dropdown lists
+  every saved connection unfiltered, appends non-standard ports to each row,
+  leads with a "saved SSH connections" caption, and closes on pick, arrow
+  toggle, Escape (before the Escape that exits the wizard), or an outside
+  pointer press. The arrow is hidden while no hosts are saved and disabled
+  while a connection is busy.
+
 ### Fixed
+
+- **Relay image input:** ID-only or invalid model metadata now stays unknown.
+  Both Desktop model editors expose per-model Auto / On / Off overrides, with
+  official protocol limits retained. A separate V2 discovery cache rejects stale
+  results; saved settings and runtime image serialization share one resolver and
+  apply at Controller rebuild boundaries. Legacy configuration remains readable.
+- **中转站图片输入：** 缺失或无效的模型能力显示“图片能力未识别”，两个编辑入口
+  均可逐模型选择“自动 / 开启 / 关闭”。独立 V2 缓存隔离旧错误声明并防止陈旧结果
+  覆盖；保存设置与实际图片请求统一解析，在 Controller 重建边界生效，兼容旧配置。
+
+- **Deterministic natural-turn completion:** removed the extra completion
+  validator model request. Clean model stops now finish from provider/tool state;
+  true zero-content responses retry the frozen request at the Agent step
+  boundary, while explicit host-owned readiness and safety gates remain active.
+  Legacy completion-validator configuration and `completion_uncertain` event
+  values remain readable for compatibility but are no longer produced by the
+  validator path.
+
+- **serve Host-header allowlist:** `reasonix serve` now rejects requests whose
+  `Host` is neither loopback nor the actual listen address (HTTP 421), closing
+  the DNS-rebinding bypass of the JSON content-type CSRF guard — a rebind page
+  becomes same-origin with the loopback listener and could previously drive
+  `/bypass`, `/submit`, and read `/history`. `behind_proxy` deployments and
+  wildcard/non-loopback binds are exempt. The non-loopback plaintext-HTTP
+  startup warning now also fires — loudest — for the unauthenticated `auth =
+  none` case that used to stay silent.
+
+- **Preview read confinement:** `write_file` / `edit_file` / `multi_edit`
+  previews now apply the same `confinePreview` boundary as `delete_range` /
+  `delete_symbol`. A model-supplied absolute path outside the workspace roots
+  previously read the file (rendering its contents into the approval card and
+  session log) even though Execute would refuse the write.
+
+- **Clean-filter hardening on internal diffs:** gitcmd diff invocations now
+  neutralize every `filter.<driver>` defined in the repository's local
+  `.git/config` (`clean=` emptied, `required` forced off), so viewing a changed
+  file's diff can no longer execute a repository-configured clean filter via
+  `.gitattributes`. Emptied filters are identity pass-throughs: the diff still
+  renders the real working-tree change.
+
+- **install_source proxy SSRF parity:** the install_source SSRF dial guard now
+  also validates the request destination (IP literals) at the RoundTripper
+  boundary, so a configured HTTP/HTTPS proxy can no longer forward a blocked
+  target (cloud metadata, RFC1918, link-local, CGNAT) that the dial-time check
+  never sees — matching web_fetch's proxy-path behavior.
+
+- **awk approval classification:** the bash indirect-execution classifier now
+  treats `awk`/`gawk`/`mawk`/`nawk` with an inline program (anything not read
+  via `-f`/`--file`) like `python -c`: it always requires human approval and
+  can never be covered by a remembered reusable prefix rule. `awk
+  'BEGIN{system("…")}'` previously fell through to the reusable class.
+
+- **cargo check/doc read-only correction:** the legacy read-only command table
+  no longer lists `cargo check` / `cargo doc` as permission readers — cargo
+  executes the crate's `build.rs` for both. The effect classifier already
+  billed them as code-executing writers; the stale table entry (and its test)
+  now agree. Only `cargo search` remains read-only.
+
+- **Compact MCP discovery:** `use_capability(action=list)` now returns one
+  compact summary per configured MCP server instead of expanding every cached
+  tool description, including tools from disabled servers. Inspecting one
+  enabled `mcp-server:<name>` still returns its live or cached directory
+  without starting it, while direct known-ID calls, routing, authorization,
+  and the fixed provider-visible tool schema remain unchanged.
+
+- **Project MCP session reliability:** The MCP client now uses the official Go
+  SDK for stdio, legacy SSE, and Streamable HTTP while retaining Reasonix's
+  existing configuration, OAuth, process isolation, and schema-cache contracts.
+  Streamable HTTP opens its long-lived GET/SSE listener immediately after
+  initialization, so JetBrains project-level `.mcp.json` servers no longer lose
+  their pending session before the first tool call. Lost sessions converge on
+  one bounded rebuild and one replay, read-only surfaces consume every cursor
+  page, prompts/resources share the tool session, and shutdown terminates HTTP
+  sessions and local processes. MCP calls also accept a single JSON-object
+  string in `use_capability.arguments`, while rejecting arrays, scalars, invalid
+  JSON, and nested encoded strings. `/mcp` and Desktop expose redacted protocol,
+  listening, reconnect, and error-category diagnostics without session IDs.
+
+- **v1.24.2 session snapshot & recovery root fix:** Keep PR #7982's WAL/CAS/lease
+  safety foundation, but replace process-level "I hold a lease" ownership with a
+  generation-bound `SessionWriteAuthority`. Same-revision tool-preview/load
+  reshapes no longer false-diverge; recovery files are bounded to one path per
+  writer/lineage; empty checkpoints heal from their own WAL; projection lineage
+  rebinds across upgrade/model switch and inherits across recovery forks without
+  changing provider-visible prompt bytes. Catalog upgrades to disposable
+  `session-catalog/v3.sqlite` with recovery lineage roles
+  (`normal|covered_copy|adopted|diverged`); covered idle copies move to the
+  recoverable `.trash` using a 15-minute idle threshold applied on two early
+  sweeps (at startup and ~20 minutes later), then a 24-hour threshold on the
+  6-hour background ticker; independent diverged branches stay and are listed
+  for user choice. v1/v2 catalogs are
+  left byte-unchanged for coexistence/downgrade.
+  **v1.24.1** only hid/reclaimed already-created covered copies and fixed Windows
+  flash-window startup; **v1.24.2** stops the misclassification source and repairs
+  existing user directories without rewriting authoritative JSONL/WAL/sidecar data.
+
+- Goal now runs continuously by default: the former 16-round per-Run boundary,
+  10/20/40 cross-Run quotas, default wall-clock budget, and numeric
+  no-progress/Todo-stall pauses no longer stop valid work. Progress guards still
+  detect repeated host outcomes and zero-evidence work, but redirect the model
+  to re-plan instead of producing `goal_run_budget` or `goal_stuck`. Explicit
+  `[agent].goal_token_budget`, `--max-steps`, positive time/cost budgets, manual
+  pause/stop, genuine user/external blockers, and evaluator fail-closed behavior
+  remain available. The Goal token budget defaults to `0` (off); resuming its
+  `budget_spend` pause grants a fresh slice without clearing cumulative usage.
+  Goal status reports turns, provider requests, tokens, the optional configured
+  token threshold, and cumulative active work time. Bot `max_steps` also
+  defaults to `0` (continuous), while positive user configuration is enforced.
+
+- Removed numeric Goal pauses in existing sidecars automatically normalize to
+  `running` without sending a model request. Active Goal sidecars write
+  `turnsLimit: -1` as a downgrade-safe unlimited sentinel while public runtime
+  APIs retain deprecated limit fields as `0`. The migration preserves unknown
+  fields, todos, checkpoints, usage, evidence, and historical metadata.
+
+- Goal is now the sole long-task runtime. Historical AutoResearch sidecars
+  migrate transactionally into Goals with research compatibility metadata. Invalid archives block
+  fail closed and remain read-only, retaining the task id and compatibility mode
+  for a restart or `/goal resume` retry; successful Goal-only sidecars omit the
+  old task id and write an explicit downgrade fence so previous readers cannot
+  reactivate the removed runtime.
+
+- Context-dependent workflow tools now share one host-side execution boundary.
+  Goal, Plan sign-off, and background-job calls cannot reach permissions,
+  hooks, leases, or Execute outside their owning context; mixed batches execute
+  valid calls once and stop safely after one repair. Child agents also isolate
+  inherited Goal, Jobs, and live memory queues, while persisted tool identity
+  records the effective child schema projection.
 
 - **Issue #7575:** Linux Bash under bubblewrap no longer mounts a fresh empty
   `--tmpfs /tmp` on every call. Consecutive commands in the same logical session

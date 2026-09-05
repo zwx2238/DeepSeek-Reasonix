@@ -367,6 +367,12 @@ func (h *botBridgeHub) turnDoneNotification(tabID string, e event.Event) desktop
 			label,
 		))}
 	}
+	if e.Outcome == event.TurnOutcomeCompletionUncertain {
+		return desktopBridgeNotification{text: constText(fmt.Sprintf(
+			"⏸️ 桌面会话「%s」本轮完成状态未确认。当前结果和已完成工作均已保留；发送“继续”可接着完成，也可以补充说明需要调整的内容。",
+			label,
+		))}
+	}
 	if e.Err != nil {
 		// Error text can contain paths/tokens; only detail it in a private chat.
 		return desktopBridgeNotification{text: func(route bot.DesktopWatchRoute) string {
@@ -400,7 +406,7 @@ func truncateForBridge(s string, limit int) string {
 	return string(runes[:limit]) + "…"
 }
 
-// ---- bot.DesktopBridge 实现 ----
+// bot.DesktopBridge 实现
 
 func (h *botBridgeHub) Sessions() []bot.DesktopSessionInfo {
 	if h.sessions == nil {
@@ -555,7 +561,7 @@ func (h *botBridgeHub) Answer(askID string, answers []event.AskAnswer) (string, 
 	return fmt.Sprintf("已提交「%s」的回答。桌面端若已先处理，以先到者为准。", h.tabLabel(p.tabID)), nil
 }
 
-// ---- 显式接管 ----
+// 显式接管
 
 func (h *botBridgeHub) Takeover(route bot.DesktopWatchRoute, tabID string) (string, error) {
 	tabID = strings.TrimSpace(tabID)
@@ -660,7 +666,7 @@ func (h *botBridgeHub) DriveInput(route bot.DesktopWatchRoute, text string) (str
 		if errors.Is(err, errDriveBusy) {
 			return "", h.busyError(tabID)
 		}
-		return "", fmt.Errorf("驱动失败: %v", err)
+		return "", fmt.Errorf("驱动失败: %w", err)
 	}
 	return "", nil
 }

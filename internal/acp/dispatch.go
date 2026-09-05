@@ -204,11 +204,17 @@ func (s *updateSink) Emit(e event.Event) {
 
 	case event.Notice:
 		// Surface warnings to the host as a message chunk so they're not lost;
-		// info-level notices stay out of band.
+		// generic info-level notices stay out of band. Completion uncertainty is
+		// a recoverable terminal result and is shown without warning severity.
 		if e.Level == event.LevelWarn && e.Text != "" {
 			s.send(messageChunk{
 				SessionUpdate: "agent_message_chunk",
 				Content:       textBlock("\n\n[warning] " + e.Text),
+			})
+		} else if e.Code == event.NoticeCodeCompletionUncertain && e.Text != "" {
+			s.send(messageChunk{
+				SessionUpdate: "agent_message_chunk",
+				Content:       textBlock("\n\n" + e.Text),
 			})
 		}
 
@@ -341,6 +347,9 @@ func (s *updateSink) send(update any) {
 // completed since it is history, not a live turn.
 func (s *updateSink) replay(msgs []provider.Message) {
 	for _, m := range msgs {
+		if agent.IsPinnedContextRevision(m) {
+			continue
+		}
 		switch m.Role {
 		case provider.RoleUser:
 			// Replay the user-authored view, not the persisted wire form:
@@ -407,6 +416,9 @@ func (s *updateSink) requestPermission(ctx context.Context, a event.Approval) {
 		title = a.Tool + " " + a.Subject
 	}
 	options := approvalOptions(a.Tool, a.Subject, a.Fresh)
+	if a.Kind == event.ApprovalKindWriteAccess || a.WriteAccess != nil {
+		options = writeAccessApprovalOptions()
+	}
 	params := PermissionRequestParams{
 		SessionID: s.sessionID,
 		ToolCall: PermissionToolCall{
@@ -425,15 +437,31 @@ func (s *updateSink) requestPermission(ctx context.Context, a event.Approval) {
 	if raw, err := s.conn.Request(ctx, "session/request_permission", params); err == nil {
 		var res PermissionRequestResult
 		if json.Unmarshal(raw, &res) == nil && res.Outcome.Outcome == "selected" {
-			switch PermissionOptionKind(res.Outcome.OptionID) {
-			case OptAllowOnce:
+			switch res.Outcome.OptionID {
+			case "reasonix_write_once":
 				allow = true
-			case OptAllowAlways:
+			case "reasonix_write_session":
+				allow, session = true, true
+			case "reasonix_write_project":
+				allow, session, persist = true, true, true
+			case "reasonix_write_deny":
+			case string(OptAllowOnce):
+				allow = true
+			case string(OptAllowAlways):
 				allow, session = true, true
 			}
 		}
 	}
 	s.approve(a.ID, allow, session, persist)
+}
+
+func writeAccessApprovalOptions() []PermissionOption {
+	return []PermissionOption{
+		{OptionID: "reasonix_write_once", Name: "Allow once", Kind: OptAllowOnce},
+		{OptionID: "reasonix_write_session", Name: "Allow these directories for this session", Kind: OptAllowAlways},
+		{OptionID: "reasonix_write_project", Name: "Add to project allow_write", Kind: OptAllowAlways},
+		{OptionID: "reasonix_write_deny", Name: "Reject", Kind: OptRejectOnce},
+	}
 }
 
 // permissionMeta carries Reasonix-owned structured data that an ACP supervisor
@@ -450,6 +478,15 @@ func (s *updateSink) permissionMeta(a event.Approval) map[string]any {
 	}
 	if reason := strings.TrimSpace(a.Reason); reason != "" {
 		reasonix["reason"] = reason
+	}
+	if wa := a.WriteAccess; wa != nil {
+		reasonix["kind"] = event.ApprovalKindWriteAccess
+		reasonix["directories"] = append([]string{}, wa.Directories...)
+		reasonix["displayDirectories"] = append([]string{}, wa.DisplayDirectories...)
+		reasonix["justification"] = wa.Justification
+		reasonix["broadHomeAccess"] = wa.BroadHomeAccess
+		reasonix["ordinaryPermissionNeeded"] = wa.OrdinaryPermissionNeeded
+		reasonix["persistAllowed"] = wa.PersistAllowed
 	}
 	if a.Tool == "bash" && strings.TrimSpace(s.cwd) != "" {
 		var input struct {

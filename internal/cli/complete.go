@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 	rw "github.com/mattn/go-runewidth"
 
+	"reasonix/internal/config"
 	"reasonix/internal/control"
 	"reasonix/internal/fileref"
 	"reasonix/internal/i18n"
@@ -61,29 +63,6 @@ const (
 	// maxFileSearchItems caps basename search results for bare @tokens.
 	maxFileSearchItems = 20
 )
-
-// slashItems returns the cached slash catalog. Rebuilds only after
-// invalidateSlashCatalog — never on ordinary keystrokes.
-func (m *chatTUI) slashItems() []compItem {
-	if m.slashCatalogOnce && m.slashCatalog != nil {
-		return m.slashCatalog
-	}
-	items := m.buildSlashCatalog()
-	// Immutable snapshot so keystroke filtering never mutates shared state.
-	out := make([]compItem, len(items))
-	copy(out, items)
-	m.slashCatalog = out
-	m.slashCatalogOnce = true
-	return m.slashCatalog
-}
-
-// invalidateSlashCatalog drops the cached catalog so the next slashItems call
-// rebuilds it. Call from model switch, skill rescan, /reload-cmd, and any path
-// that mutates commands/skills/host/extension actions.
-func (m *chatTUI) invalidateSlashCatalog() {
-	m.slashCatalogOnce = false
-	m.slashCatalog = nil
-}
 
 // refreshHostAndInvalidateSlashCatalog reloads m.host from the controller and
 // drops the slash catalog so MCP prompts (and any host-backed menu entries)
@@ -144,8 +123,8 @@ func renameSlashItem(items []compItem, oldLabel, newLabel string) []compItem {
 			continue
 		}
 		items[i].label = newLabel
-		if strings.HasPrefix(items[i].insert, oldLabel) {
-			items[i].insert = newLabel + strings.TrimPrefix(items[i].insert, oldLabel)
+		if after, ok := strings.CutPrefix(items[i].insert, oldLabel); ok {
+			items[i].insert = newLabel + after
 		}
 		break
 	}
@@ -193,6 +172,7 @@ func (m *chatTUI) updateCompletion() {
 				return
 			}
 		} else if m.bareSubcommandSpace(val) {
+			m.endSlashArgSnapshot()
 			m.completion = completion{}
 			return
 		} else if items, from, ok := m.slashArgItems(val); ok && len(items) > 0 {
@@ -225,10 +205,7 @@ func (m *chatTUI) inputCursorByteOffset() int {
 					// cur.X is screen-relative and includes the "❯ " prompt
 					// gutter (composerPromptWidth columns). Subtract it so
 					// we measure content columns only.
-					col := cur.X - composerPromptWidth
-					if col < 0 {
-						col = 0
-					}
+					col := max(cur.X-composerPromptWidth, 0)
 					visual := 0
 					for _, cell := range row.cells {
 						w := rw.RuneWidth(cell.r)
@@ -273,24 +250,24 @@ func runeOffsetToByte(val string, runeOff int) int {
 // currently /mcp; custom commands and MCP prompts take free-form template args,
 // so they yield nothing.
 func (m *chatTUI) slashArgItems(val string) ([]compItem, int, bool) {
-	if items, from, ok := m.workModeArgItems(val); ok {
-		return items, from, len(items) > 0
-	}
 	if items, from, ok := m.branchArgItems(val); ok {
+		m.endSlashArgSnapshot()
 		return items, from, len(items) > 0
 	}
 	if items, from, ok := m.resumeArgItems(val); ok {
+		m.endSlashArgSnapshot()
 		return items, from, len(items) > 0
 	}
 	if items, from, ok := m.themeArgItems(val); ok {
+		m.endSlashArgSnapshot()
 		return items, from, len(items) > 0
 	}
 	// Delegate to the shared completion logic so the chat TUI and the desktop
 	// offer identical sub-command hints. We supply the data from the TUI's own
 	// cached lists (no live controller needed), build the items, and adapt them
 	// to compItem.
-	items, from := control.SlashArgItems(val, m.slashArgData())
-	if len(items) == 0 {
+	items, from, applies := m.cachedSlashArgItems(val)
+	if !applies || len(items) == 0 {
 		return nil, 0, false
 	}
 	return slashItemsToComps(items), from, true
@@ -308,6 +285,11 @@ func (m *chatTUI) slashArgData() control.ArgData {
 		ProviderNames:   providerNames(),
 		CurrentProvider: curProvider,
 		PluginNames:     pluginArgNames(),
+	}
+	if strings.TrimSpace(m.modelRef) != "" {
+		if entry, _, err := m.currentConfigProvider(); err == nil {
+			data.EffortLevels = slices.Clone(config.EffortCapabilityForEntry(entry).Levels)
+		}
 	}
 	if m.ctrl != nil {
 		data.DisabledSkills = m.ctrl.DisabledSkills()
@@ -331,7 +313,9 @@ func (m *chatTUI) explicitSubcommandItems(val string) ([]compItem, int, bool) {
 	default:
 		return nil, 0, false
 	}
-	items, _ := control.SlashArgItems(cmd+" ", m.slashArgData())
+	// These question-mark overlays only list static root subcommands. Dynamic
+	// data is resolved after the user descends into an argument that needs it.
+	items, _ := control.SlashArgItems(cmd+" ", control.ArgData{})
 	if len(items) == 0 {
 		return nil, 0, false
 	}
@@ -420,6 +404,11 @@ func (m *chatTUI) setCompletion(kind compKind, items []compItem, replaceFrom, re
 	}
 }
 
+func (m *chatTUI) dismissCompletion() {
+	m.completion = completion{}
+	m.endSlashArgSnapshot()
+}
+
 // fuzzyFilterSlash returns the slash-menu items that match query as a
 // case-insensitive subsequence of their label, with prefix hits ranked first
 // (each group preserved in the input order from slashItems). An empty query
@@ -505,13 +494,7 @@ func activeAtToken(val string, cursor int) (at, end int, query string, ok bool) 
 		case '@':
 			if i == 0 || val[i-1] == ' ' || val[i-1] == '\t' || val[i-1] == '\n' {
 				end = tokenEnd(val, i+1)
-				queryEnd := cursor
-				if queryEnd < i+1 {
-					queryEnd = i + 1
-				}
-				if queryEnd > end {
-					queryEnd = end
-				}
+				queryEnd := min(max(cursor, i+1), end)
 				return i, end, val[i+1 : queryEnd], true
 			}
 			return 0, 0, "", false
@@ -608,10 +591,7 @@ func (m *chatTUI) fileItems(token string) []compItem {
 		for _, it := range items {
 			seen[strings.TrimPrefix(it.insert, "@")] = true
 		}
-		remaining := maxCompItems - len(items)
-		if remaining > maxFileSearchItems {
-			remaining = maxFileSearchItems
-		}
+		remaining := min(maxCompItems-len(items), maxFileSearchItems)
 		results := m.searchFileRefs(fsFrag)
 		if len(results) > remaining {
 			results = results[:remaining]
@@ -669,12 +649,7 @@ func (m *chatTUI) isMCPServer(name string) bool {
 	if m.host == nil {
 		return false
 	}
-	for _, s := range m.host.ServerNames() {
-		if s == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(m.host.ServerNames(), name)
 }
 
 // resourceItems lists MCP resources as @server:uri completions. When server is
@@ -756,7 +731,7 @@ func (m *chatTUI) completionSelectedInsertPresent() bool {
 // keystrokes never call this path, so mid-line typing keeps its caret.
 func (m *chatTUI) acceptCompletion() {
 	if m.completion.sel >= len(m.completion.items) {
-		m.completion = completion{}
+		m.dismissCompletion()
 		return
 	}
 	it := m.completion.items[m.completion.sel]
@@ -792,6 +767,10 @@ func (m *chatTUI) acceptCompletion() {
 		return
 	}
 	m.updateCompletion() // re-filter for arg completion (e.g. /resume → numbered sessions)
+	if !m.completion.active {
+		m.endSlashArgSnapshot()
+		return
+	}
 	// If the completion re-opened with the same single item the user just
 	// selected (i.e. the token was already typed), close it so the next Enter
 	// submits the command rather than being captured again by acceptCompletion.
@@ -800,7 +779,7 @@ func (m *chatTUI) acceptCompletion() {
 		val := m.input.Value()
 		if rf >= 0 && rf <= len(val) && rt >= rf && rt <= len(val) {
 			if val[rf:rt] == m.completion.items[0].insert {
-				m.completion = completion{}
+				m.dismissCompletion()
 			}
 		}
 	}
@@ -835,18 +814,9 @@ func (m chatTUI) renderCompletion() string {
 	items := m.completion.items
 	start := 0
 	if len(items) > maxCompRows {
-		start = m.completion.sel - maxCompRows/2
-		if start < 0 {
-			start = 0
-		}
-		if start > len(items)-maxCompRows {
-			start = len(items) - maxCompRows
-		}
+		start = min(max(m.completion.sel-maxCompRows/2, 0), len(items)-maxCompRows)
 	}
-	end := start + maxCompRows
-	if end > len(items) {
-		end = len(items)
-	}
+	end := min(start+maxCompRows, len(items))
 
 	var b strings.Builder
 	for i := start; i < end; i++ {

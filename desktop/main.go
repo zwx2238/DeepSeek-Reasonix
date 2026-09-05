@@ -20,13 +20,11 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
-
 	// Blank imports wire compile-time built-ins into their registries, exactly as
 	// cmd/reasonix does — boot.Build resolves providers/tools from these registries.
 	_ "reasonix/internal/provider/anthropic"
 	_ "reasonix/internal/provider/openai"
 	_ "reasonix/internal/provider/responses"
-	"reasonix/internal/repair"
 	_ "reasonix/internal/tool/builtin"
 )
 
@@ -54,8 +52,9 @@ var channel = "stable"
 var macSelfUpdate = "false"
 
 const (
-	disableWebview2GPUEnv  = "REASONIX_DESKTOP_DISABLE_WEBVIEW2_GPU"
-	linuxDRIRenderNodeGlob = "/dev/dri/renderD*"
+	disableWebview2GPUEnv       = "REASONIX_DISABLE_WEBVIEW2_GPU"
+	legacyDisableWebview2GPUEnv = "REASONIX_DESKTOP_DISABLE_WEBVIEW2_GPU"
+	linuxDRIRenderNodeGlob      = "/dev/dri/renderD*"
 )
 
 func macSelfUpdateAllowed() bool {
@@ -68,18 +67,23 @@ func macSelfUpdateAllowed() bool {
 }
 
 func windowsWebview2GPUDisabled() bool {
-	if raw, ok := os.LookupEnv(disableWebview2GPUEnv); ok {
-		switch strings.ToLower(strings.TrimSpace(raw)) {
-		case "1", "true", "yes", "on":
-			return true
-		case "0", "false", "no", "off", "":
-			return false
+	for _, key := range []string{disableWebview2GPUEnv, legacyDisableWebview2GPUEnv} {
+		if raw, ok := os.LookupEnv(key); ok {
+			switch strings.ToLower(strings.TrimSpace(raw)) {
+			case "1", "true", "yes", "on":
+				return true
+			case "0", "false", "no", "off", "":
+				return false
+			}
 		}
 	}
 	return channel == "preview" || channel == "canary"
 }
 
 func linuxWebviewGpuPolicy(pattern string) linux.WebviewGpuPolicy {
+	if linuxRendererCompatibilityMode() {
+		return linux.WebviewGpuPolicyNever
+	}
 	matches, err := filepath.Glob(pattern)
 	if err == nil {
 		for _, path := range matches {
@@ -93,7 +97,15 @@ func linuxWebviewGpuPolicy(pattern string) linux.WebviewGpuPolicy {
 	return linux.WebviewGpuPolicyNever
 }
 
+func preparePrimaryDesktopRuntime(app *App) {
+	// Recovery remains active when optional diagnostics telemetry is disabled.
+	installWebView2ProcessObserver(app)
+	prepareDesktopDiagnostics(app)
+	capturePendingUpdateHealthIdentity(app)
+}
+
 func main() {
+	prepareLinuxRendererCompatibilityEnvironment()
 	// Detached macOS self-update child: wait for the old PID, hold the shared
 	// repair mutation lock, then swap the .app bundle. Must run before Wails.
 	if handled, exitCode := maybeRunMacUpdateHandoff(os.Args[1:]); handled {
@@ -110,8 +122,9 @@ func main() {
 	appMenu := app.createAppMenu()
 	dragAndDrop := &options.DragAndDrop{EnableFileDrop: true}
 	bindings := []any{app}
+	remoteWindow := launch.RemoteWindowTicket != ""
 
-	if launch.RemoteWindowTicket != "" {
+	if remoteWindow {
 		// A remote web child window: a second Reasonix process that hosts the
 		// SSH Serve page for one remote host. It deliberately skips local
 		// runtimes (tabs, tray, heartbeat, providers) and exposes no Wails
@@ -132,22 +145,11 @@ func main() {
 		dragAndDrop = &options.DragAndDrop{DisableWebViewDrop: true}
 		bindings = nil
 	} else {
-		// Observe previous run for crash diagnostics only. Startup tracking must
-		// never force Safe Mode, disable plugins, or select a previous binary.
-		app.previousRun = repair.NewStartupTracker("").ObservePreviousRun()
-		capturePendingUpdateHealthIdentity(app)
+		preparePrimaryDesktopRuntime(app)
+		defer app.releaseDesktopDiagnosticsOwnership()
 	}
 
-	// Restore saved window size, or fall back to the default.
-	width, height := 1240, 720
-	if saved, ok := loadWindowState(); ok {
-		if saved.Width > 0 {
-			width = saved.Width
-		}
-		if saved.Height > 0 {
-			height = saved.Height
-		}
-	}
+	width, height := initialDesktopWindowSize(remoteWindow)
 
 	// Restore saved desktop zoom factor (WebView2 ZoomFactor), or default to 1.0.
 	zoomFactor := 1.0
@@ -163,7 +165,7 @@ func main() {
 		Title:     title,
 		Width:     width,
 		Height:    height,
-		Frameless: goruntime.GOOS == "windows",
+		Frameless: desktopWindowFrameless(goruntime.GOOS, remoteWindow),
 		Logger:    newCrashCaptureLogger(app),
 		MinWidth:  760,
 		MinHeight: 480,
@@ -199,7 +201,7 @@ func main() {
 		// against the --wails-drop-target element instead.
 		DragAndDrop: dragAndDrop,
 
-		// --- per-platform adaptation (see desktop/README.md for the rationale) ---
+		// per-platform adaptation (see desktop/README.md for the rationale)
 		Mac: &mac.Options{
 			// Inset traffic-lights over a frameless-feeling header; the frontend
 			// leaves a drag region at the top (CSS --wails-draggable).
