@@ -1,6 +1,6 @@
 # Reasonix Broker 集成补丁说明
 
-本文件描述本 fork（branch `broker-refresh`）相对上游 `esengine/Reasonix` `main-v2`
+本文件描述发布分支 `broker-managed` 相对上游 `esengine/DeepSeek-Reasonix` `main-v2`
 仍保留的补丁、保留理由、退出条件与验证命令。Broker（local-agent-bridge 主仓）是
 这些补丁的唯一消费者；上游演进后按本文逐项复核，能满足退出条件即删除对应补丁。
 
