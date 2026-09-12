@@ -108,6 +108,18 @@
 - 测试：`go test ./internal/acp/ -run 'TestE2ESessionLoad|TestE2ESessionListResumeAndDelete'`
   （断言恰好一条 `usage_update`，used=100 size=200000）
 
+### P7 OpenCode Go 请求的会话身份
+
+- 文件：`internal/provider/streamsession.go`、`internal/provider/openai/opencode_session.go`、
+  `internal/provider/openai/openai.go` 与 control 的同步/异步 turn、标题生成入口。
+- 内容：使用 `agent.BranchID(sessionPath)` 绑定请求上下文，仅对官方
+  `https://opencode.ai/zen/go/v1` 路由发送 `x-opencode-session`。同步 turn 在准入锁内
+  读取会话路径；重试和续写继承同一身份，不同会话不共享静态 header。
+- 理由：该网关拒绝无会话 header 的推理请求；只配置 base_url 和 API key 不足以调用。
+- 退出条件：上游在这些调用入口提供等价的会话身份传播及官方路由 header 支持。
+- 测试：`go test ./internal/provider ./internal/provider/openai ./internal/control`。
+  真实模型调用和 Broker MCP 验证由消费者的生产验收完成，不以模拟网关替代。
+
 ## 本次升级中已收敛/确认不需要本地补丁的项
 
 - `REASONIX_HOME`：上游原生。

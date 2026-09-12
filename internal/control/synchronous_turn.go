@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 
+	"reasonix/internal/agent"
 	"reasonix/internal/event"
 	"reasonix/internal/extension"
 	"reasonix/internal/provider"
@@ -21,7 +22,6 @@ func (c *Controller) runSynchronousTurn(
 		return err
 	}
 	ctx, cancel := context.WithCancel(extension.ContextWithRuntimeOwner(ctx, c.RuntimeOwner()))
-	ctx = provider.WithStreamSession(ctx, c.parentSessionID())
 	c.mu.Lock()
 	// Finishing is part of the gate: TurnDone is still fanning out. Closed
 	// seals a torn-down controller. Blocking callers get an error rather than
@@ -37,6 +37,7 @@ func (c *Controller) runSynchronousTurn(
 		c.emitDrainingNotice()
 		return ErrRuntimeDraining
 	}
+	ctx = provider.WithStreamSession(ctx, agent.BranchID(c.sessionPath))
 	c.cancel = cancel
 	c.running = true
 	c.canceling = false
