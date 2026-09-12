@@ -257,6 +257,7 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		longcat:         longcat,
 		kimiK3:          kimiK3,
 		mimo:            IsMiMo(cfg.BaseURL),
+		openCodeGo:      isOpenCodeGoChatBase(cfg.BaseURL),
 		thinkingType:    thinkingType,
 		vision:          vision,
 		modelInfo:       modelInfo,
@@ -297,6 +298,7 @@ type client struct {
 	longcat         bool   // true for LongCat — gates thinking via thinking.type, ignores reasoning_effort
 	kimiK3          bool   // true for the explicit K3 protocol or kimi-k3 on Moonshot's direct API hosts
 	mimo            bool   // true for MiMo — upgrades legacy tuple schemas to Draft 2020-12
+	openCodeGo      bool   // true for the official OpenCode Go route — sends x-opencode-session
 	thinkingType    string // explicit `thinking` config override (enabled|disabled); "" = no override
 	vision          bool   // model accepts image input — embed attached images as image_url parts
 	modelInfo       provider.ModelInfo
@@ -516,6 +518,7 @@ func (c *client) openStream(ctx context.Context, targetURL string, wireReq chatR
 		applyAPIKeyHeader(httpReq.Header, c.baseURL, c.apiKey)
 		httpReq.Header.Set("Accept", "text/event-stream")
 		applyCustomHeaders(httpReq.Header, c.headers)
+		c.applySessionHeader(httpReq.Header, ctx)
 		return httpReq, nil
 	}
 	resp, err := provider.SendWithRetry(requestCtx, c.http, c.sendOpts(), newReq)

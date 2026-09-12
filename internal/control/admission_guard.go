@@ -3,8 +3,10 @@ package control
 import (
 	"context"
 
+	"reasonix/internal/agent"
 	"reasonix/internal/event"
 	"reasonix/internal/extension"
+	"reasonix/internal/provider"
 )
 
 // admissionResult classifies what runGuarded did with a turn body.
@@ -80,6 +82,10 @@ func (c *Controller) admitGuardedTurn(body func(ctx context.Context) error, park
 		return turnParked
 	}
 	ctx, cancel := context.WithCancel(extension.ContextWithRuntimeOwner(context.Background(), c.runtimeOwner))
+	// c.mu is held here, so read the guarded field directly instead of
+	// SessionPath(); the branch id is the conversation identity official-route
+	// providers replay as x-opencode-session.
+	ctx = provider.WithStreamSession(ctx, agent.BranchID(c.sessionPath))
 	c.cancel = cancel
 	c.running = true
 	c.canceling = false

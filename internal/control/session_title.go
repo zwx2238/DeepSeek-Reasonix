@@ -39,6 +39,7 @@ func (c *Controller) GenerateSessionTitle(ctx context.Context, transcript string
 	if err != nil {
 		return "", err
 	}
+	ctx = provider.WithStreamSession(ctx, c.parentSessionID())
 	raw, err := boundedllm.Call(ctx, boundedllm.Config{
 		Provider:       prov,
 		ModelRef:       ref,

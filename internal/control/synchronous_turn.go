@@ -5,6 +5,7 @@ import (
 
 	"reasonix/internal/event"
 	"reasonix/internal/extension"
+	"reasonix/internal/provider"
 )
 
 // runSynchronousTurn owns the blocking transport lifecycle. Durable steer
@@ -20,6 +21,7 @@ func (c *Controller) runSynchronousTurn(
 		return err
 	}
 	ctx, cancel := context.WithCancel(extension.ContextWithRuntimeOwner(ctx, c.RuntimeOwner()))
+	ctx = provider.WithStreamSession(ctx, c.parentSessionID())
 	c.mu.Lock()
 	// Finishing is part of the gate: TurnDone is still fanning out. Closed
 	// seals a torn-down controller. Blocking callers get an error rather than
