@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"reasonix/internal/pluginpkg"
@@ -183,5 +184,103 @@ func TestCommandDirsWithoutPluginState(t *testing.T) {
 	t.Setenv("REASONIX_HOME", home)
 	if dirs := CommandDirsForRoot(t.TempDir()); len(dirs) == 0 {
 		t.Fatal("CommandDirsForRoot must still return the conventional dirs")
+	}
+}
+
+// TestCommandRootsForRootSkipsRealHomeWhenIsolated pins the Agent Home
+// isolation contract for custom slash commands: once REASONIX_HOME points at
+// a sandbox home, CommandRootsForRoot must not enumerate ~/.claude/commands,
+// ~/.agents/commands, ~/.agent/commands or ~/.reasonix/commands from the real
+// user HOME. The plugin roots, the Reasonix-home commands dir, and the
+// project convention subdirs under the workspace root must still load so the
+// isolated runtime keeps its own authoring surface.
+func TestCommandRootsForRootSkipsRealHomeWhenIsolated(t *testing.T) {
+	isolated := t.TempDir()
+	workspace := t.TempDir()
+	t.Setenv("REASONIX_HOME", isolated)
+	// Forge a real HOME that contains a Claude-style commands dir; the isolated
+	// runtime must not pick it up.
+	realHome := t.TempDir()
+	realClaude := filepath.Join(realHome, ".claude", "commands")
+	if err := os.MkdirAll(realClaude, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realClaude, "sneak.md"), []byte("# leaked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", realHome)
+	if runtimeGOOS == "windows" {
+		t.Setenv("USERPROFILE", realHome)
+	}
+
+	roots := CommandRootsForRoot(workspace)
+	for _, r := range roots {
+		if strings.HasPrefix(r.Path, realClaude) {
+			t.Fatalf("CommandRootsForRoot leaked real HOME Claude commands dir %q under isolated REASONIX_HOME %q: %#v", r.Path, isolated, roots)
+		}
+		if strings.HasPrefix(r.Path, filepath.Join(realHome, ".agents", "commands")) ||
+			strings.HasPrefix(r.Path, filepath.Join(realHome, ".agent", "commands")) ||
+			strings.HasPrefix(r.Path, filepath.Join(realHome, ".reasonix", "commands")) {
+			t.Fatalf("CommandRootsForRoot leaked real HOME convention dir %q under isolated REASONIX_HOME: %#v", r.Path, roots)
+		}
+	}
+
+	// The isolated Reasonix home commands dir must still be present.
+	wantIsolatedCommands := filepath.Join(isolated, "commands")
+	var sawIsolated bool
+	for _, r := range roots {
+		if samePath(r.Path, wantIsolatedCommands) {
+			sawIsolated = true
+			break
+		}
+	}
+	if !sawIsolated {
+		t.Fatalf("CommandRootsForRoot under isolated REASONIX_HOME must still include %q, got %#v", wantIsolatedCommands, roots)
+	}
+
+	// Project convention subdirs under the workspace must still be discovered.
+	wantProjectClaude := filepath.Join(workspace, ".claude", "commands")
+	var sawProject bool
+	for _, r := range roots {
+		if samePath(r.Path, wantProjectClaude) {
+			sawProject = true
+			break
+		}
+	}
+	if !sawProject {
+		t.Fatalf("CommandRootsForRoot under isolated REASONIX_HOME must still include project convention dir %q, got %#v", wantProjectClaude, roots)
+	}
+}
+
+// TestCommandRootsForRootIncludesRealHomeClaudeByDefault pins the pre-isolation
+// behaviour: without REASONIX_HOME the loader still walks the real user HOME
+// convention subdirs (notably ~/.claude/commands) so existing installs keep
+// working. This is the counterpart to the isolated test above and ensures the
+// isolation guard does not regress the default path.
+func TestCommandRootsForRootIncludesRealHomeClaudeByDefault(t *testing.T) {
+	t.Setenv("REASONIX_HOME", "")
+	realHome := t.TempDir()
+	realClaude := filepath.Join(realHome, ".claude", "commands")
+	if err := os.MkdirAll(realClaude, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realClaude, "hello.md"), []byte("# hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", realHome)
+	if runtimeGOOS == "windows" {
+		t.Setenv("USERPROFILE", realHome)
+	}
+
+	roots := CommandRootsForRoot(t.TempDir())
+	var sawClaude bool
+	for _, r := range roots {
+		if samePath(r.Path, realClaude) {
+			sawClaude = true
+			break
+		}
+	}
+	if !sawClaude {
+		t.Fatalf("CommandRootsForRoot without REASONIX_HOME must include real HOME %q, got %#v", realClaude, roots)
 	}
 }

@@ -592,6 +592,15 @@ func CommandDirsForRoot(root string) []string {
 // CommandRootsForRoot is the ownership-aware form of CommandDirsForRoot.
 // Plugin roots retain their package name so the loader can expose stable,
 // package-qualified command names and hidden short-name compatibility aliases.
+//
+// When REASONIX_HOME is set (see IsolatedHomeDir) the runtime runs against an
+// explicit sandbox home; the home-dir convention subdirs
+// (~/.claude/commands, ~/.agents/commands, ~/.agent/commands,
+// ~/.reasonix/commands) are skipped in that mode so an isolated sandbox does
+// not silently inherit slash commands authored under the real user HOME
+// (notably ~/.claude/commands from a host Claude install). Project convention
+// subdirs, the plugin-owned roots, and the Reasonix-home commands dir still
+// load — isolation is purely a guard against the real HOME bypass.
 func CommandRootsForRoot(root string) []command.Root {
 	root = resolveRoot(root)
 	var roots []command.Root
@@ -617,9 +626,11 @@ func CommandRootsForRoot(root string) []command.Root {
 	for _, legacy := range legacyXDGConfigPaths() {
 		add(command.Root{Path: filepath.Join(filepath.Dir(legacy), "commands")})
 	}
-	if home, err := osUserHomeDir(); err == nil {
-		for _, dir := range conventionSubdirsAsc(home, "commands") {
-			add(command.Root{Path: dir})
+	if IsolatedHomeDir() == "" {
+		if home, err := osUserHomeDir(); err == nil {
+			for _, dir := range conventionSubdirsAsc(home, "commands") {
+				add(command.Root{Path: dir})
+			}
 		}
 	}
 	if dir := userConfigDir(); dir != "" {
